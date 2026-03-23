@@ -9,6 +9,8 @@ from pathlib import Path
 import random
 import re
 import time
+import logging
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -34,6 +36,35 @@ _HTTP_SESSION = requests_cache.CachedSession(
     allowable_methods=("GET",),
 )
 
+# Simple token-bucket rate limiter to avoid hammering external services from the server.
+class RateLimiter:
+    def __init__(self, rate_per_sec: float = 5.0, burst: int = 10):
+        self.rate = float(rate_per_sec)
+        self.capacity = float(burst)
+        self.tokens = self.capacity
+        self.timestamp = time.time()
+        self.lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.timestamp
+            self.timestamp = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+            # Need to wait for token refill
+            need = 1.0 - self.tokens
+            wait_seconds = need / self.rate
+        time.sleep(wait_seconds)
+
+# Module-level rate limiter used by HTTP helpers.
+RATE_LIMITER = RateLimiter(rate_per_sec=5.0, burst=10)
+
+# Module logger
+logger = logging.getLogger(__name__)
+
 
 @retry(
     reraise=True,
@@ -42,7 +73,71 @@ _HTTP_SESSION = requests_cache.CachedSession(
     retry=retry_if_exception_type(requests.RequestException),
 )
 def _http_get(url: str, **kwargs: Any) -> requests.Response:
-    return _HTTP_SESSION.get(url, **kwargs)
+    """Perform a GET with sensible defaults: timeout, headers and rate-limiting.
+
+    Tenacity retries on RequestException. This function also handles 429
+    responses by honoring Retry-After when provided and raising a
+    requests.RequestException to trigger retries.
+    """
+    headers = kwargs.pop("headers", {}) or {}
+    headers.setdefault(
+        "User-Agent",
+        "mathematically-correct-builds/1.0 (+https://github.com/felixthomsen127-coder/Mathematicallycorrectbuilds)",
+    )
+    headers.setdefault("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
+    timeout = kwargs.pop("timeout", 12.0)
+
+    # Apply client-side rate limiting to avoid server-side throttles.
+    try:
+        RATE_LIMITER.wait()
+    except Exception:
+        # If rate limiter fails for any reason, proceed (do not crash the app).
+        logger.exception("Rate limiter failure, proceeding without delay")
+
+    try:
+        res = _HTTP_SESSION.get(url, headers=headers, timeout=timeout, **kwargs)
+    except requests.RequestException:
+        logger.exception("Request failed for %s", url)
+        raise
+
+    # If the server explicitly asks for Retry-After, respect it and raise so
+    # tenacity will retry the request after the configured wait.
+    if getattr(res, "status_code", 0) == 429:
+        retry_after = None
+        try:
+            retry_after = LeagueWikiClient._parse_retry_after_seconds(res.headers.get("Retry-After"))
+        except Exception:
+            retry_after = None
+        if retry_after:
+            logger.warning("Received 429 from %s; sleeping %s seconds per Retry-After", url, retry_after)
+            time.sleep(retry_after)
+        else:
+            logger.warning("Received 429 from %s; backing off", url)
+            # small jittered backoff
+            time.sleep(min(1.0, timeout) + random.random() * 0.25)
+        # Raise to trigger tenacity retry behaviour.
+        raise requests.RequestException(f"429 Too Many Requests: {url}")
+
+    # Log cache vs network responses for observability
+    try:
+        from_cache = getattr(res, "from_cache", False)
+        if from_cache:
+            logger.debug("HTTP GET from cache: %s", url)
+        else:
+            logger.debug("HTTP GET network: %s (status=%s)", url, getattr(res, "status_code", "?"))
+    except Exception:
+        pass
+
+    return res
+
+
+def _safe_json(response: requests.Response) -> Any:
+    """Decode JSON responses with a clear error on failure."""
+    try:
+        return response.json()
+    except Exception as exc:
+        logger.exception("Invalid JSON from %s", getattr(response, "url", "unknown"))
+        raise DataSourceError(f"Failed to decode JSON from {getattr(response, 'url', 'unknown')}: {exc}") from exc
 
 
 class LocalJsonCache:
@@ -145,7 +240,8 @@ class LeagueWikiClient:
         }
         res = _http_get(self.BASE, params=params, timeout=self.timeout_seconds)
         res.raise_for_status()
-        pages = res.json().get("query", {}).get("pages", {})
+        payload = _safe_json(res)
+        pages = payload.get("query", {}).get("pages", {})
         for page in pages.values():
             revs = page.get("revisions", [])
             if revs:
@@ -350,7 +446,7 @@ class LeagueWikiClient:
                     continue
 
                 res.raise_for_status()
-                payload = res.json()
+                payload = _safe_json(res)
                 text = payload.get("parse", {}).get("wikitext", {}).get("*", "")
                 if not text:
                     raise DataSourceError(f"Wiki module returned empty payload: {page}")
@@ -991,7 +1087,8 @@ class WikiScalingParser:
         }
         res = _http_get(self.BASE_API, params=params, timeout=self.timeout_seconds)
         res.raise_for_status()
-        pages = res.json().get("query", {}).get("pages", {})
+        payload = _safe_json(res)
+        pages = payload.get("query", {}).get("pages", {})
         for page in pages.values():
             revs = page.get("revisions", [])
             if not revs:
@@ -1634,7 +1731,8 @@ class WikiScalingParser:
         }
         res = _http_get(self.BASE_API, params=params, timeout=self.timeout_seconds)
         res.raise_for_status()
-        pages = res.json().get("query", {}).get("pages", {})
+        payload = _safe_json(res)
+        pages = payload.get("query", {}).get("pages", {})
         for page in pages.values():
             revs = page.get("revisions", [])
             if revs:
@@ -1655,7 +1753,7 @@ class WikiScalingParser:
                 if res.status_code == 404:
                     continue
                 res.raise_for_status()
-                payload = res.json()
+                payload = _safe_json(res)
                 parse = payload.get("parse", {})
                 html = parse.get("text", {}).get("*", "")
                 if not html:

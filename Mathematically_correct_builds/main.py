@@ -29,6 +29,8 @@ from data_sources import (
     WikiScalingParser,
     merge_profile_with_scaling,
     override_champion_scaling,
+    _safe_json,
+    RATE_LIMITER,
 )
 from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages
 from optimizer import BuildConstraints, BuildOptimizer, EnemyProfile, ItemStats, ObjectiveWeights, RuneChoice, RunePage, SearchSettings
@@ -62,7 +64,38 @@ _ICON_HTTP_SESSION = requests_cache.CachedSession(
   retry=retry_if_exception_type(requests.RequestException),
 )
 def _http_get_with_retry(url: str, **kwargs: Any) -> requests.Response:
-  return _ICON_HTTP_SESSION.get(url, **kwargs)
+  """Cached session GET with rate-limiting, default headers and 429 handling."""
+  headers = kwargs.pop("headers", {}) or {}
+  headers.setdefault(
+    "User-Agent",
+    "mathematically-correct-builds/1.0 (+https://github.com/felixthomsen127-coder/Mathematicallycorrectbuilds)",
+  )
+  timeout = kwargs.pop("timeout", 10.0)
+
+  # Apply shared rate limiting
+  try:
+    RATE_LIMITER.wait()
+  except Exception:
+    pass
+
+  try:
+    res = _ICON_HTTP_SESSION.get(url, headers=headers, timeout=timeout, **kwargs)
+  except requests.RequestException:
+    raise
+
+  if getattr(res, "status_code", 0) == 429:
+    retry_after = None
+    try:
+      retry_after = LeagueWikiClient._parse_retry_after_seconds(res.headers.get("Retry-After"))
+    except Exception:
+      retry_after = None
+    if retry_after:
+      time.sleep(retry_after)
+    else:
+      time.sleep(min(1.0, timeout) + random.random() * 0.25)
+    raise requests.RequestException(f"429 Too Many Requests: {url}")
+
+  return res
 
 riot = LeagueWikiClient()
 wiki = WikiScalingParser()
@@ -379,7 +412,7 @@ def _load_rune_catalog(force: bool = False) -> Dict[str, Any]:
 
   versions_res = _http_get_with_retry("https://ddragon.leagueoflegends.com/api/versions.json", timeout=10.0)
   versions_res.raise_for_status()
-  versions_payload = versions_res.json()
+  versions_payload = _safe_json(versions_res)
   if isinstance(versions_payload, list) and versions_payload:
     version = str(versions_payload[0])
   if not version:
@@ -388,7 +421,7 @@ def _load_rune_catalog(force: bool = False) -> Dict[str, Any]:
   runes_url = f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/runesReforged.json"
   runes_res = _http_get_with_retry(runes_url, timeout=10.0)
   runes_res.raise_for_status()
-  styles = runes_res.json()
+  styles = _safe_json(runes_res)
   if not isinstance(styles, list):
     raise ValueError("Unexpected rune catalog payload")
 
