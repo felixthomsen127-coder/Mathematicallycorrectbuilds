@@ -1,0 +1,73 @@
+{
+  "champion": {
+    "champion_name": "FixtureChamp",
+    "base_hp": 710,
+    "base_armor": 34,
+    "base_mr": 32,
+    "ad_ratio": 1.1,
+    "ap_ratio": 0.8,
+    "attack_speed_ratio": 0.25,
+    "heal_ratio": 0.3,
+    "abilities_per_rotation": 4.0,
+    "average_combat_seconds": 8.0
+  },
+  "weights": {
+    "damage": 1.0,
+    "healing": 0.2,
+    "tankiness": 0.1,
+    "lifesteal": 0.1
+  },
+  "settings": {
+    "mode": "near_exhaustive",
+    "build_size": 3,
+    "candidate_pool_size": 6,
+    "beam_width": 15,
+    "exhaustive_runtime_cap_seconds": 10.0,
+    "order_permutation_cap": 120
+  },
+  "expected_top_contains": [
+    "Execution Blade",
+    "Armor Breaker"
+  ],
+  "items": [
+    {
+      "item_id": "201",
+      "name": "Execution Blade",
+      "total_gold": 3200,
+      "ad": 85,
+      "lifesteal": 0.1
+    },
+    {
+      "item_id": "202",
+      "name": "Armor Breaker",
+      "total_gold": 3000,
+      "ad": 40,
+      "armor_pen": 0.35
+    },
+    {
+      "item_id": "203",
+      "name": "Defender Plate",
+      "total_gold": 3000,
+      "hp": 500,
+      "armor": 60
+    },
+    {
+      "item_id": "204",
+      "name": "Arcane Orb",
+      "total_gold": 3000,
+      "ap": 100
+    },
+    {
+      "item_id": "205",
+      "name": "Silver Boots",
+      "total_gold": 1100,
+      "armor": 20
+    },
+    {
+      "item_id": "206",
+      "name": "Haste Core",
+      "total_gold": 2800,
+      "ability_haste": 25
+    }
+  ]
+}
