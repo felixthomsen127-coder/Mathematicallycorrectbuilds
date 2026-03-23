@@ -412,7 +412,9 @@ class BuildOptimizer:
             return score
 
         backend = self._resolve_compute_backend(settings.compute_backend)
-        self._active_compute_backend = backend
+        # GPU does pre-scoring; CPU does final full evaluation (hybrid mode).
+        # Report "gpu+cpu" so callers know both units are used.
+        self._active_compute_backend = "gpu+cpu" if backend == "gpu" else "cpu"
         use_prescore = settings.deep_search or backend == "gpu"
         beam_width = max(2, settings.beam_width * (2 if settings.deep_search else 1))
         # Canonical pass + random restarts; deep search can use more restarts and wider beams.
@@ -642,7 +644,11 @@ class BuildOptimizer:
 
         ehp_vs_physical = hp * (1.0 + armor / 100.0)
         ehp_vs_magic = hp * (1.0 + mr / 100.0)
-        tankiness = ehp_vs_physical * enemy.physical_share + ehp_vs_magic * (1.0 - enemy.physical_share)
+        # Factor in self-damage-reduction from champion abilities (e.g. Warwick E, Briar E, Garen W).
+        # A champion that can reduce incoming damage by X% is effectively more tanky.
+        self_dr = self._aggregate_self_damage_reduction()
+        dr_factor = 1.0 + min(0.60, self_dr)  # cap contribution at +60% effective HP
+        tankiness = (ehp_vs_physical * enemy.physical_share + ehp_vs_magic * (1.0 - enemy.physical_share)) * dr_factor
 
         lifesteal_metric = lifesteal + omnivamp
         interaction_bonus, interactions = self._interaction_bonus(items, ad, ap, lifesteal_metric, armor_pen, magic_pen)
@@ -709,6 +715,7 @@ class BuildOptimizer:
             "consistency": round(consistency_metric, 3),
             "order_bonus": round(order_bonus, 3),
             "interaction_bonus": round(interaction_bonus, 3),
+            "self_damage_reduction": round(self_dr, 4),
         }
 
         contributions = {
@@ -1185,6 +1192,24 @@ class BuildOptimizer:
             "consistency_ratio": min(1.0, consistency_signal / total),
             "range_bias": min(1.0, avg_range / 700.0),
         }
+
+    def _aggregate_self_damage_reduction(self) -> float:
+        """Sum ability-based self damage reduction ratios across the champion's kit.
+
+        Abilities like Warwick E (Primal Howl), Briar E (Chilling Scream), and
+        Garen W (Courage) grant the champion damage reduction while active.  The
+        aggregated value is used to boost effective-HP (tankiness) in the
+        objective function so that tanky-kit champions are rewarded correctly.
+        The return value is a fraction between 0.0 and 0.80.
+        """
+        breakdown = self.champion.ability_breakdown or {}
+        total_dr = 0.0
+        for block in breakdown.values():
+            if not isinstance(block, dict):
+                continue
+            if block.get("has_damage_reduction"):
+                total_dr += float(block.get("damage_reduction_ratio", 0.0) or 0.0)
+        return min(0.80, total_dr)
 
     def _resolve_compute_backend(self, backend: str) -> str:
         requested = str(backend or "auto").strip().lower()

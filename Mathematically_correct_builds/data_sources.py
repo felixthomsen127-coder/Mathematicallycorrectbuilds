@@ -1021,6 +1021,9 @@ class WikiScalingParser:
                 "is_stack_scaling": self._is_stack_scaling(text),
                 "range_units": self._extract_range(text),
             }
+            _has_dr, _dr_ratio = self._extract_damage_reduction(text)
+            candidate["has_damage_reduction"] = _has_dr
+            candidate["damage_reduction_ratio"] = _dr_ratio
             candidate["scaling_by_application"] = self._group_components_by_application(candidate.get("scaling_components", []))
 
             if key not in breakdown:
@@ -1070,6 +1073,8 @@ class WikiScalingParser:
                     "is_conditional": False,
                     "is_stack_scaling": False,
                     "range_units": 0.0,
+                    "has_damage_reduction": False,
+                    "damage_reduction_ratio": 0.0,
                 },
             )
 
@@ -1332,12 +1337,15 @@ class WikiScalingParser:
                     "is_conditional": self._is_conditional(sections["all"]),
                     "is_stack_scaling": self._is_stack_scaling(sections["all"]),
                     "range_units": self._extract_range(sections["all"]),
+                    "has_damage_reduction": self._extract_damage_reduction(sections["all"])[0],
+                    "damage_reduction_ratio": self._extract_damage_reduction(sections["all"])[1],
                 }
             return breakdown
 
         for key, text in sections.items():
             ratios = self._extract_ratio_values(text)
             components = self._extract_scaling_components(text)
+            _has_dr, _dr_ratio = self._extract_damage_reduction(text)
             breakdown[key] = {
                 "name": key.upper(),
                 "ad_ratio": float(ratios.get("ad_ratio", 0.0)),
@@ -1363,6 +1371,8 @@ class WikiScalingParser:
                 "is_conditional": self._is_conditional(text),
                 "is_stack_scaling": self._is_stack_scaling(text),
                 "range_units": self._extract_range(text),
+                "has_damage_reduction": _has_dr,
+                "damage_reduction_ratio": _dr_ratio,
             }
 
         for key in ("q", "w", "e", "r"):
@@ -1393,6 +1403,8 @@ class WikiScalingParser:
                     "is_conditional": False,
                     "is_stack_scaling": False,
                     "range_units": 0.0,
+                    "has_damage_reduction": False,
+                    "damage_reduction_ratio": 0.0,
                 },
             )
         return breakdown
@@ -1599,15 +1611,52 @@ class WikiScalingParser:
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-                if not match:
-                    return {}
-                parsed = json.loads(match.group(0))
+                cleaned = self._clean_ai_json_response(raw)
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+                    if not match:
+                        return {}
+                    try:
+                        parsed = json.loads(match.group(0))
+                    except json.JSONDecodeError:
+                        return {}
             if not isinstance(parsed, dict):
                 return {}
             return self._sanitize_ai_breakdown(parsed, sections)
         except Exception:
             return {}
+
+    @staticmethod
+    def _clean_ai_json_response(raw: str) -> str:
+        """Clean common LLM JSON formatting issues before parsing.
+
+        LLMs often emit:
+        - Control characters embedded in strings
+        - Trailing commas before closing braces/brackets
+        - Markdown code fences (```json ... ```)
+        - Single-line // comments
+        - Non-breaking spaces and other unicode whitespace
+        """
+        # Strip markdown code fences
+        text = re.sub(r"```(?:json)?\s*", "", raw or "")
+        text = text.replace("```", "")
+
+        # Remove // single-line comments (not valid JSON)
+        text = re.sub(r"//[^\n]*", "", text)
+
+        # Replace control characters (except standard whitespace) with a space
+        # This handles the "Expecting ',' delimiter" error from embedded ASCII control chars
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+
+        # Fix trailing commas before ] or } — not valid JSON but common in LLM output
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+
+        # Replace non-breaking spaces and similar unicode whitespace with regular space
+        text = re.sub(r"[\u00a0\u2009\u200b\u200c\u200d\ufeff]", " ", text)
+
+        return text.strip()
 
     def _sanitize_ai_breakdown(self, payload: Dict[str, Any], sections: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
         raw_map = payload.get("ability_breakdown", payload)
@@ -1662,6 +1711,8 @@ class WikiScalingParser:
                 "is_conditional": self._is_conditional(_sec_text),
                 "is_stack_scaling": self._is_stack_scaling(_sec_text),
                 "range_units": self._extract_range(_sec_text),
+                "has_damage_reduction": self._extract_damage_reduction(_sec_text)[0],
+                "damage_reduction_ratio": self._extract_damage_reduction(_sec_text)[1],
             }
             out[norm_key]["scaling_by_application"] = self._group_components_by_application(out[norm_key].get("scaling_components", []))
         return out
@@ -2101,6 +2152,69 @@ class WikiScalingParser:
         return bool(re.search(r"on.hit|applies?\s+on.hit|on\s+hit", text, re.IGNORECASE))
 
     @staticmethod
+    def _extract_damage_reduction(text: str) -> Tuple[bool, float]:
+        """Detect if the ability grants the champion self damage reduction.
+
+        Returns ``(has_damage_reduction, reduction_ratio)`` where ``reduction_ratio``
+        is expressed as a fraction (0.0–1.0).  Examples that trigger this:
+          - Warwick E (Primal Howl): "reduces damage taken by 35%"
+          - Briar E (Chilling Scream): "reduces all damage taken by 20%"
+          - Garen W (Courage): "reduces damage taken by 30%"
+        """
+        if not text:
+            return False, 0.0
+        lower = text.lower()
+        # Keywords that indicate a self-damage-reduction effect
+        _REDUCTION_KEYWORDS = (
+            "damage taken",
+            "damage reduction",
+            "reduces damage",
+            "reduce damage",
+            "incoming damage",
+            "damage received",
+            "take less damage",
+            "takes less damage",
+            "less damage",
+            "block damage",
+            "mitigates damage",
+        )
+        if not any(kw in lower for kw in _REDUCTION_KEYWORDS):
+            return False, 0.0
+        # Look for a nearby percentage value
+        pattern = re.compile(
+            r"(?:reduces?|reduce|block[s]?|mitigate[s]?)\s*(?:all\s+)?(?:incoming\s+)?"
+            r"(?:physical\s+|magic(?:al)?\s+|true\s+)?damage[^%]{0,40}?(\d+(?:\.\d+)?)\s*%"
+            r"|(\d+(?:\.\d+)?)\s*%[^%]{0,40}?(?:damage\s+reduction|less\s+damage\s+taken|less\s+damage)"
+            r"|takes?\s+(\d+(?:\.\d+)?)\s*%\s+less\s+damage"
+            r"|damage\s+taken\s+(?:is\s+)?(?:reduced?\s+by|by)\s+(\d+(?:\.\d+)?)\s*%",
+            re.IGNORECASE,
+        )
+        best = 0.0
+        for m in pattern.finditer(lower):
+            val_str = m.group(1) or m.group(2) or m.group(3) or m.group(4) or "0"
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            if 1.0 < val <= 100.0:
+                val = val / 100.0
+            if val > best:
+                best = val
+        if best <= 0.0:
+            # Fallback: just check "damage taken" near any percentage
+            generic = re.compile(r"(\d+(?:\.\d+)?)\s*%[^.\n]{0,50}damage\s+taken", re.IGNORECASE)
+            for m in generic.finditer(lower):
+                try:
+                    val = float(m.group(1))
+                    if 1.0 < val <= 100.0:
+                        val = val / 100.0
+                    if val > best:
+                        best = val
+                except ValueError:
+                    continue
+        return best > 0.0, min(best, 0.80)
+
+    @staticmethod
     def _extract_channeled(text: str) -> bool:
         """Return True if the ability channels or has a significant wind-up."""
         if not text:
@@ -2461,9 +2575,13 @@ class OllamaClient:
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
-            # Try to extract first JSON object from response
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            result = json.loads(match.group(0)) if match else {}
+            # Clean common LLM JSON issues (trailing commas, control chars, code fences)
+            cleaned = WikiScalingParser._clean_ai_json_response(raw)
+            try:
+                result = json.loads(cleaned)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                result = json.loads(match.group(0)) if match else {}
 
         candidates = result.get("candidates")
         if not isinstance(candidates, list):
