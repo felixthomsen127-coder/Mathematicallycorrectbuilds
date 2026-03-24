@@ -199,6 +199,26 @@ def _extract_structured_rune_pages_from_payload(payload: Any) -> List[Tuple[List
 
 def _extract_json_script_payloads(html: str) -> List[Any]:
     payloads: List[Any] = []
+
+    # Priority 1: Next.js __NEXT_DATA__ — the canonical source for champion-specific
+    # build data. This script tag has type="application/json" and is always present.
+    next_data_match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        html, flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not next_data_match:
+        # Also try without id attribute (some versions use data-id)
+        next_data_match = re.search(
+            r'<script[^>]+type=["\']application/json["\'][^>]*>(.*?)</script>',
+            html, flags=re.DOTALL | re.IGNORECASE,
+        )
+    if next_data_match:
+        try:
+            payloads.append(json.loads(next_data_match.group(1).strip()))
+        except Exception:
+            pass
+
+    # Priority 2: Other inline JSON/script blocks
     scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, flags=re.DOTALL | re.IGNORECASE)
     for script in scripts:
         text = script.strip()
@@ -386,7 +406,8 @@ def _find_item_id_arrays(
 ) -> List[List[str]]:
     """Walk any parsed JSON value and return resolved item-name lists.
 
-    Looks for lists of 4-6 integers all in the LoL item-ID range (1001-7999).
+    Looks for lists of 4-7 integers (or integer-valued strings) all in the LoL
+    item-ID range (1001-7999), or objects with ``itemId``/``item_id`` keys.
     Uses item_id_to_name to resolve IDs to English names.  Emits a build only
     if at least 4 IDs resolve to real names.  Bounded by a node-visit cap so
     large Next.js payloads don't stall.
@@ -395,30 +416,79 @@ def _find_item_id_arrays(
     seen_keys: set = set()
     visited = [0]
 
+    def _to_item_id(val: Any) -> Optional[int]:
+        """Try to parse val as a LoL item ID integer."""
+        try:
+            i = int(val)
+            if 1001 <= i <= 7999:
+                return i
+        except (TypeError, ValueError):
+            pass
+        return None
+
     def _visit(node: Any, depth: int) -> None:
-        if visited[0] > 20_000 or len(results) >= 50:
+        if visited[0] > 30_000 or len(results) >= 50:
             return
         visited[0] += 1
         if isinstance(node, list):
+            # Case 1: list of integers or integer-strings (e.g. [6632, 3036, ...])
             if 4 <= len(node) <= 7:
                 int_vals = []
-                ok = True
+                all_valid = True
                 for x in node:
-                    if isinstance(x, int) and 1001 <= x <= 7999:
-                        int_vals.append(x)
+                    item_id = _to_item_id(x)
+                    if item_id is not None:
+                        int_vals.append(item_id)
                     else:
-                        ok = False
+                        all_valid = False
                         break
-                if ok and len(int_vals) >= 4:
+                if all_valid and len(int_vals) >= 4:
                     names = [item_id_to_name[str(v)] for v in int_vals if str(v) in item_id_to_name]
                     if len(names) >= 4:
-                        key = tuple(names)
+                        key = tuple(sorted(names))
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            results.append(names[:6])
+            # Case 2: list of objects with itemId fields (e.g. [{"itemId": 6632}, ...])
+            if 4 <= len(node) <= 7:
+                obj_ids = []
+                for x in node:
+                    if isinstance(x, dict):
+                        for field in ("itemId", "item_id", "id", "ItemId"):
+                            item_id = _to_item_id(x.get(field))
+                            if item_id is not None:
+                                obj_ids.append(item_id)
+                                break
+                if len(obj_ids) >= 4:
+                    names = [item_id_to_name[str(v)] for v in obj_ids if str(v) in item_id_to_name]
+                    if len(names) >= 4:
+                        key = tuple(sorted(names))
                         if key not in seen_keys:
                             seen_keys.add(key)
                             results.append(names[:6])
             for child in node:
                 _visit(child, depth + 1)
         elif isinstance(node, dict):
+            # Case 3: dict with "items" or "itemIds" key containing an ID list
+            for build_key in ("items", "item_ids", "itemIds", "item_list", "build"):
+                arr = node.get(build_key)
+                if isinstance(arr, list) and 4 <= len(arr) <= 7:
+                    int_vals = []
+                    all_valid = True
+                    for x in arr:
+                        item_id = _to_item_id(x)
+                        if item_id is not None:
+                            int_vals.append(item_id)
+                        else:
+                            all_valid = False
+                            break
+                    if all_valid and len(int_vals) >= 4:
+                        names = [item_id_to_name[str(v)] for v in int_vals if str(v) in item_id_to_name]
+                        if len(names) >= 4:
+                            key = tuple(sorted(names))
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                results.append(names[:6])
             for child in node.values():
                 _visit(child, depth + 1)
 
