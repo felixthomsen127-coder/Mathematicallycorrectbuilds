@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 from threading import Lock, Thread
 import time
@@ -748,7 +749,6 @@ def _run_optimization(
     items = riot.get_items(patch, force_refresh=force_refresh)
     _step(f"Fetched patch {patch} - {len(items)} items available", 0.20)
     _step(f"Champion profile: {champion} [{', '.join(profile.champion_tags)}]", 0.26)
-
     saved_overrides: Dict[str, Dict[str, float]] = {}
     _scaling_warn = ""
     try:
@@ -857,7 +857,10 @@ def _run_optimization(
     _emit(f"Running {settings.mode} search", 0.60)
     ranked, pareto, checkpoints = optimizer_obj.optimize(weights, settings, constraints=constraints, enemy=enemy)
     search_ms = round((time.perf_counter() - t_search) * 1000)
-    _step(f"{settings.mode} search - {len(ranked)} builds scored ({search_ms} ms)", 0.91)
+    _step(f"{settings.mode} search complete — {len(ranked)} builds scored ({search_ms} ms)", 0.91)
+
+    if ranked:
+      _step(f"Top build score: {ranked[0].weighted_score:.1f} — comparing to meta builds", 0.94)
 
     meta_compare = {
       "source": "u.gg",
@@ -899,6 +902,7 @@ def _run_optimization(
           evaluate_meta_build_fn=_evaluate_meta_build,
           item_id_to_name=_item_id_map,
         )
+        _step("Meta comparison complete", 0.97)
       except Exception as exc:
         meta_compare = {
           "source": "none",

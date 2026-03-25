@@ -614,14 +614,17 @@ class BuildOptimizer:
         flat_magic_pen = sum(x.flat_magic_pen for x in items) + rune_effects["flat_magic_pen"]
         max_hp_damage = sum(x.max_hp_damage for x in items) + rune_effects["max_hp_damage"]
 
-        auto_physical = ad + attack_speed * 100.0 * 0.25
+        # Apply diminishing returns to raw stats for scoring purposes
+        eff_ad, eff_ap, eff_hp, eff_armor, eff_mr = self._apply_diminishing_returns(ad, ap, hp, armor, mr)
+
+        auto_physical = eff_ad + attack_speed * 100.0 * 0.25
         spell_phys, spell_magic, spell_rotation, kit_heal_factor = self._spell_bundle_damage(
-            ad,
-            ap,
+            eff_ad,
+            eff_ap,
             attack_speed,
-            hp,
-            armor,
-            mr,
+            eff_hp,
+            eff_armor,
+            eff_mr,
             ability_haste,
         )
         max_hp_proc_damage = max_hp_damage * enemy.target_hp * self.champion.abilities_per_rotation
@@ -635,15 +638,26 @@ class BuildOptimizer:
         physical_after_mitigation = premit_physical * (100.0 / (100.0 + effective_armor))
         magic_after_mitigation = premit_magic * (100.0 / (100.0 + effective_mr))
 
-        base_damage = physical_after_mitigation + magic_after_mitigation + premit_true
+        # Pen breakpoint bonuses: reward pen items that match the enemy's resistance profile
+        pen_bonus = 0.0
+        if enemy.target_armor > 100 and armor_pen > 0:
+            pen_bonus += armor_pen * enemy.target_armor * 0.08
+        if enemy.target_armor < 80 and flat_armor_pen > 0:
+            pen_bonus += flat_armor_pen * 0.06
+        if enemy.target_mr > 100 and magic_pen > 0:
+            pen_bonus += magic_pen * enemy.target_mr * 0.08
+        if enemy.target_mr < 80 and flat_magic_pen > 0:
+            pen_bonus += flat_magic_pen * 0.06
+
+        base_damage = physical_after_mitigation + magic_after_mitigation + premit_true + pen_bonus
         damage = base_damage * (1.0 + damage_amp)
 
         self_heal_from_kit = kit_heal_factor
         sustain_from_damage = damage * (lifesteal * 0.22 + omnivamp * 0.28)
         healing = (self_heal_from_kit + sustain_from_damage) * (1.0 + heal_amp)
 
-        ehp_vs_physical = hp * (1.0 + armor / 100.0)
-        ehp_vs_magic = hp * (1.0 + mr / 100.0)
+        ehp_vs_physical = eff_hp * (1.0 + eff_armor / 100.0)
+        ehp_vs_magic = eff_hp * (1.0 + eff_mr / 100.0)
         # Factor in self-damage-reduction from champion abilities (e.g. Warwick E, Briar E, Garen W).
         # A champion that can reduce incoming damage by X% is effectively more tanky.
         self_dr = self._aggregate_self_damage_reduction()
@@ -653,14 +667,15 @@ class BuildOptimizer:
         lifesteal_metric = lifesteal + omnivamp
         interaction_bonus, interactions = self._interaction_bonus(items, ad, ap, lifesteal_metric, armor_pen, magic_pen)
         advanced_signals = self._advanced_ability_signals()
+        gold_eff_bonus = self._gold_efficiency_bonus(items)
 
         burst_profile = damage * (0.92 + min(80.0, ability_haste) / 260.0 + attack_speed * 0.05)
         sustained_profile = damage * (1.0 + min(160.0, ability_haste) / 180.0 + attack_speed * 0.12)
         aoe_pressure = damage * advanced_signals["aoe_ratio"] * 0.25
         utility_profile = (
             ability_haste * 0.85
-            + (armor + mr) * 0.32
-            + max(0.0, hp - self.champion.base_hp) * 0.02
+            + (eff_armor + eff_mr) * 0.32
+            + max(0.0, eff_hp - self.champion.base_hp) * 0.02
             + advanced_signals["utility_ratio"] * 35.0
             + advanced_signals["range_bias"] * 22.0
         )
@@ -691,6 +706,7 @@ class BuildOptimizer:
         contribution_consistency = weights.consistency * consistency_metric
         contribution_order = 0.03 * order_bonus
         contribution_interaction = interaction_bonus
+        contribution_gold_eff = gold_eff_bonus
 
         weighted = (
             contribution_damage
@@ -701,6 +717,7 @@ class BuildOptimizer:
             + contribution_consistency
             + contribution_order
             + contribution_interaction
+            + contribution_gold_eff
         )
 
         metrics = {
@@ -715,6 +732,7 @@ class BuildOptimizer:
             "consistency": round(consistency_metric, 3),
             "order_bonus": round(order_bonus, 3),
             "interaction_bonus": round(interaction_bonus, 3),
+            "gold_efficiency_bonus": round(gold_eff_bonus, 3),
             "self_damage_reduction": round(self_dr, 4),
         }
 
@@ -727,6 +745,7 @@ class BuildOptimizer:
             "consistency_component": round(contribution_consistency, 3),
             "order_component": round(contribution_order, 3),
             "interaction_component": round(contribution_interaction, 3),
+            "gold_efficiency_component": round(contribution_gold_eff, 3),
         }
 
         return BuildEvaluation(
@@ -1105,6 +1124,50 @@ class BuildOptimizer:
 
         return out
 
+    def _apply_diminishing_returns(
+        self,
+        ad: float,
+        ap: float,
+        hp: float,
+        armor: float,
+        mr: float,
+    ) -> tuple[float, float, float, float, float]:
+        """Apply soft diminishing returns to raw stats above natural thresholds."""
+        ad_excess = max(0.0, ad - 200.0) / 200.0
+        ap_excess = max(0.0, ap - 300.0) / 300.0
+        hp_excess = max(0.0, hp - 3000.0) / 3000.0
+        armor_excess = max(0.0, armor - 150.0) / 150.0
+        mr_excess = max(0.0, mr - 100.0) / 100.0
+
+        eff_ad = ad * (1.0 - 0.035 * ad_excess)
+        eff_ap = ap * (1.0 - 0.035 * ap_excess)
+        eff_hp = hp * (1.0 - 0.035 * hp_excess)
+        eff_armor = armor * (1.0 - 0.035 * armor_excess)
+        eff_mr = mr * (1.0 - 0.035 * mr_excess)
+        return eff_ad, eff_ap, eff_hp, eff_armor, eff_mr
+
+    def _gold_efficiency_bonus(self, items: Sequence[ItemStats]) -> float:
+        """Reward items that provide above-average stat value per gold spent.
+        Only applies positive bonuses; below-average items are not penalized."""
+        total = 0.0
+        for item in items:
+            gold = max(1.0, float(getattr(item, "total_gold", 0) or 0))
+            if gold < 500:
+                continue  # skip components / free items
+            value = (
+                item.ad * 35.0
+                + item.ap * 22.0
+                + item.hp * 2.5
+                + item.armor * 20.0
+                + item.mr * 20.0
+                + item.ability_haste * 25.0
+            )
+            efficiency = value / gold - 1.0
+            # Only reward above-average efficiency; do not penalize below-average
+            if efficiency > 0:
+                total += efficiency * 5.0
+        return min(50.0, total)
+
     def _interaction_bonus(
         self,
         items: Sequence[ItemStats],
@@ -1139,6 +1202,29 @@ class BuildOptimizer:
             pair_bonus = 14.0
             bonus += pair_bonus
             interactions.append(f"On-hit shred loop (+{pair_bonus:.2f})")
+
+        # --- Enhanced synergies ---
+        attack_speed = sum(x.attack_speed for x in items)
+        if any("kraken" in n for n in names) and attack_speed > 0.5:
+            pair_bonus = 18.0
+            bonus += pair_bonus
+            interactions.append(f"Kraken Slayer + AS synergy (+{pair_bonus:.2f})")
+        if any("trinity" in n for n in names) and ad > 150:
+            pair_bonus = 16.0
+            bonus += pair_bonus
+            interactions.append(f"Trinity Force AD spellblade (+{pair_bonus:.2f})")
+        if any("rabadon" in n for n in names) and ap > 200:
+            pair_bonus = 28.0 * min(1.0, (ap - 200.0) / 300.0 + 0.5)
+            bonus += pair_bonus
+            interactions.append(f"Rabadon's AP amplifier (+{pair_bonus:.2f})")
+        if any("eclipse" in n for n in names):
+            pair_bonus = 10.0
+            bonus += pair_bonus
+            interactions.append(f"Eclipse burst proc (+{pair_bonus:.2f})")
+        if any("sundered sky" in n for n in names) and ad > 100:
+            pair_bonus = 12.0
+            bonus += pair_bonus
+            interactions.append(f"Sundered Sky crit heal (+{pair_bonus:.2f})")
 
         return bonus, interactions
 

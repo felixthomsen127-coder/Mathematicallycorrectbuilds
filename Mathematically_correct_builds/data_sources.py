@@ -2567,7 +2567,7 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.4, "num_predict": 600},
+            "options": {"temperature": 0.45, "num_predict": 900},
         }
         res = requests.post(f"{self.BASE}/api/generate", json=payload, timeout=self.timeout_seconds)
         res.raise_for_status()
@@ -2688,35 +2688,65 @@ class OllamaClient:
                 names = ", ".join(x.get("name", "") for x in b.get("order", []))
                 score = b.get("weighted_score", 0)
                 lines.append(f"  #{i}: [{names}] (score {score})")
-            top_ref = "Mathematical top builds for reference (do NOT just copy these — give a creative alternative):\n" + "\n".join(lines) + "\n"
+            top_ref = (
+                "FORBIDDEN — calculator top builds (do NOT copy or closely replicate these):\n"
+                + "\n".join(lines)
+                + "\n"
+            )
 
         damage_focus = weights.get("damage", 1.0)
         heal_focus = weights.get("healing", 0.0)
         tank_focus = weights.get("tankiness", 0.0)
 
+        enemy_armor = enemy_profile.get("target_armor", 120)
+        enemy_mr = enemy_profile.get("target_mr", 90)
+        enemy_hp = enemy_profile.get("target_hp", 3200)
+        matchup_notes = []
+        if enemy_armor > 140:
+            matchup_notes.append("enemy has very high armor — % armor pen and anti-tank items are key")
+        elif enemy_armor < 60:
+            matchup_notes.append("enemy has low armor — flat armor pen and lethality items shine")
+        if enemy_mr > 120:
+            matchup_notes.append("enemy has high MR — % magic pen (Void Staff) is critical")
+        elif enemy_mr < 50:
+            matchup_notes.append("enemy has low MR — flat magic pen gives outsized value")
+        if enemy_hp > 4000:
+            matchup_notes.append("enemy is a tank — max-HP damage items (Bork, Liandry's) are valuable")
+        matchup_hint = "; ".join(matchup_notes) if matchup_notes else "balanced matchup"
+
         return f"""You are an expert League of Legends build theorist advising on {champion}.
 
 Objective weights: damage={damage_focus}, healing={heal_focus}, tankiness={tank_focus}
-Enemy profile: HP={enemy_profile.get('target_hp', 3200)}, Armor={enemy_profile.get('target_armor', 120)}, MR={enemy_profile.get('target_mr', 90)}
+Enemy profile: HP={enemy_hp}, Armor={enemy_armor}, MR={enemy_mr}
+Matchup context: {matchup_hint}
 
 {top_ref}{good_block}{bad_block}
-Generate 3 different 6-item build candidates for {champion} optimised for the objective weights above.
+Your job is to generate 3 build candidates that the MATH CALCULATOR would MISS or rank lower than they deserve.
+Think creatively about:
+- Non-standard or off-meta keystones that have hidden synergy with this champion's kit
+- On-hit items for auto-attack-reliant melee champions
+- Utility items that provide soft stats (slow, shred, healing) the optimizer undervalues
+- Burst vs sustained playstyle tradeoffs
+- How the specific enemy matchup (armor/MR/HP values above) shapes item priority
+- Unconventional item orderings or 2-item spike timings
+
 Rules:
-- Candidate 1 should be stable/meta-adjacent.
-- Candidate 2 should be balanced but not a direct copy of known meta.
-- Candidate 3 should be high-risk/high-reward and intentionally innovative.
-- Include rune hints for each candidate.
-- Avoid duplicate items in a candidate.
+- Candidate 1: "meta-adjacent" — take a known strong foundation but swap one item for something the calculator ignores
+- Candidate 2: "playstyle variant" — build optimised for a different win condition (e.g. sustained vs burst, all-in vs poke)
+- Candidate 3: "off-meta innovation" — genuinely non-standard build that could catch enemies off guard
+- Each candidate must have exactly 6 items with no duplicates
+- Include rune hints that synergize with the build philosophy
+- Justify WHY each candidate beats the calculator on hidden value
 Respond ONLY with valid JSON in this exact format:
 {{
     "candidates": [
         {{
-            "label": "stable",
+            "label": "meta-adjacent",
             "items": ["Item Name 1", "Item Name 2", "Item Name 3", "Item Name 4", "Item Name 5", "Item Name 6"],
             "rune_hints": ["Keystone", "Primary Tree", "Secondary Tree"],
-            "reasoning": "2-3 sentence explanation",
-            "playstyle_note": "1 sentence gameplay note",
-            "innovation_thesis": "short sentence describing what makes this candidate distinct"
+            "reasoning": "2-3 sentence explanation of the build's core idea",
+            "playstyle_note": "1 sentence describing how to play this build",
+            "innovation_thesis": "1 sentence on what hidden value this build captures that the calculator misses"
         }}
     ]
 }}"""

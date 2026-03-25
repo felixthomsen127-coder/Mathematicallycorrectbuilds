@@ -46,13 +46,13 @@
       background:
         linear-gradient(145deg, rgba(7, 12, 18, 0.74), rgba(8, 16, 23, 0.82) 42%, rgba(8, 14, 22, 0.9)),
         var(--champion-splash-url) center top / cover no-repeat;
-      opacity: 0.42;
+      opacity: 0.52;
       transform: scale(1.04) translateZ(0);
       transition: opacity 360ms ease, transform 520ms ease;
       filter: saturate(1.06) contrast(1.04);
     }
     body.splash-ready::before {
-      opacity: 0.58;
+      opacity: 0.65;
       transform: scale(1.02) translateZ(0);
     }
     body::after {
@@ -312,6 +312,7 @@
       font-weight: 700;
       line-height: 1;
       overflow: hidden;
+      opacity: 0.35;
     }
     .rune-orb-icon {
       width: 100%;
@@ -320,16 +321,17 @@
       display: block;
     }
     .rune-orb-keystone {
-      width: 34px;
-      height: 34px;
+      width: 42px;
+      height: 42px;
       border-color: #947200;
       color: #ffe399;
       background: radial-gradient(circle at 30% 30%, #9e7f2f 0%, #5a4516 60%, #2d230f 100%);
       box-shadow: 0 0 0 1px rgba(255, 214, 140, 0.25);
     }
     .rune-orb-selected {
-      border-color: #ffe08f;
-      box-shadow: 0 0 0 1px rgba(255, 214, 140, 0.46), 0 0 10px rgba(255, 200, 110, 0.25);
+      border: 2px solid #ffd700;
+      box-shadow: 0 0 0 2px rgba(255, 215, 0, 0.6), 0 0 16px rgba(255, 200, 80, 0.5);
+      opacity: 1.0;
       transform: translateY(-1px);
     }
     .rune-shard-row {
@@ -353,10 +355,12 @@
       align-items: center;
       justify-content: center;
       background: radial-gradient(circle at 35% 35%, #31475d 0%, #192635 65%, #0f1822 100%);
+      opacity: 0.35;
     }
     .rune-shard-selected {
-      border-color: #cfe5ff;
-      box-shadow: 0 0 0 1px rgba(165, 206, 255, 0.5), 0 0 10px rgba(117, 176, 250, 0.28);
+      border: 2px solid #9b59b6;
+      box-shadow: 0 0 0 2px rgba(155, 89, 182, 0.6);
+      opacity: 1.0;
       color: #e7f3ff;
     }
     .compare-card { position: relative; overflow: hidden; }
@@ -506,6 +510,10 @@
       100% { transform: translateX(220%); }
     }
     .load-pct { margin-top: 0.36rem; font-size: 0.8rem; }
+    .load-step-log { max-height: 120px; overflow: hidden; margin-top: 8px; }
+    .load-step-item { font-size: 0.78rem; color: var(--muted); padding: 2px 0; animation: step-appear 0.35s ease; }
+    .load-step-item.current { color: var(--ink); font-weight: 500; }
+    @keyframes step-appear { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
     .step-timeline { list-style:none; margin:0.5rem 0 0; padding:0; font-size:0.82rem; }
     .step-timeline li { padding:2px 0; color:var(--muted); }
     .step-timeline li::before { content:'OK '; color:var(--green); }
@@ -514,6 +522,36 @@
 
     /* Hero header */
     .hero-content { margin-bottom: 1.2rem; }
+    /* Champion splash banner */
+    .champ-splash-banner {
+      width: 100%;
+      height: 160px;
+      border-radius: 12px;
+      background: var(--champion-splash-url) center 15% / cover no-repeat;
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 0.9rem;
+      opacity: 0;
+      transition: opacity 600ms ease;
+    }
+    .champ-splash-banner.visible {
+      opacity: 1;
+    }
+    .champ-splash-banner::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(
+        to right,
+        rgba(10, 16, 24, 0.0) 30%,
+        rgba(10, 16, 24, 0.65) 100%
+      ),
+      linear-gradient(
+        to bottom,
+        rgba(10, 16, 24, 0.0) 40%,
+        rgba(10, 16, 24, 0.85) 100%
+      );
+    }
     .hero-title {
       font-size: clamp(1.4rem, 3vw, 2.15rem); font-weight: 700;
       background: linear-gradient(120deg, var(--accent), var(--accent-2) 50%, #7de8d0);
