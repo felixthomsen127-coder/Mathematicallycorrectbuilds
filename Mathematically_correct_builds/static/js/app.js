@@ -15,6 +15,7 @@ let splashThemeController = null;
 let splashThemeRequestId = 0;
 let lastMetaComparison = null;
 let lastBuildWarning = '';
+let prefetchStatusTimer = 0;
 const BUILD_PRESET_STORAGE_KEY = 'mcb.buildPreset';
 const ENEMY_SCENARIO_STORAGE_KEY = 'mcb.enemyScenario';
 const CHAMPION_STORAGE_KEY = 'mcb.selectedChampion';
@@ -77,6 +78,92 @@ function renderRuntimeNotice() {
   notice.textContent = ocr.available
     ? `OCR fallback ready: ${String(ocr.reason || 'available')}`
     : `OCR fallback inactive: ${String(ocr.reason || 'not available')}`;
+}
+
+function renderPrefetchStatus(data) {
+  const pctEl = document.getElementById('prefetchPct');
+  const fillEl = document.getElementById('prefetchFill');
+  const metaEl = document.getElementById('prefetchMeta');
+  if (!pctEl || !fillEl || !metaEl) return;
+
+  const criticalPct = Number(data && data.critical_progress_percent || 0);
+  const overallPct = Number(data && data.progress_percent || 0);
+  const running = Boolean(data && data.running);
+  const currentLabel = String(data && data.current_label || '').trim();
+  const criticalCompleted = Number(data && data.critical_completed || 0);
+  const criticalTotal = Number(data && data.critical_total || 0);
+  const failed = Number(data && data.failed || 0);
+
+  pctEl.textContent = `${Math.round(criticalPct)}%`;
+  fillEl.style.width = `${Math.max(0, Math.min(100, criticalPct))}%`;
+
+  if (!running && overallPct >= 100) {
+    metaEl.textContent = 'Critical data ready for this patch.';
+    return;
+  }
+
+  const head = criticalTotal > 0
+    ? `${criticalCompleted}/${criticalTotal} critical tasks ready`
+    : 'Preparing patch cache';
+  const tail = currentLabel || (running ? 'Background fetch running...' : 'Waiting to start...');
+  const failText = failed > 0 ? ` | ${failed} failed` : '';
+  metaEl.textContent = `${head}${failText} | ${tail}`;
+}
+
+async function pollPrefetchStatus() {
+  try {
+    const res = await fetch('/api/prefetch-status');
+    const data = await res.json();
+    if (!res.ok) return;
+    renderPrefetchStatus(data || {});
+  } catch (_) {
+    // Ignore background status failures; the page remains usable.
+  } finally {
+    window.clearTimeout(prefetchStatusTimer);
+    prefetchStatusTimer = window.setTimeout(pollPrefetchStatus, 2500);
+  }
+}
+
+async function prioritizeChampionPrefetch(championName) {
+  if (!championName) return;
+  try {
+    await fetch('/api/prefetch-priority', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        champion: championName,
+        role: document.getElementById('role') ? document.getElementById('role').value : 'jungle',
+        tier: document.getElementById('meta_tier') ? document.getElementById('meta_tier').value : 'emerald_plus',
+        region: document.getElementById('meta_region') ? document.getElementById('meta_region').value : 'global',
+        patch: document.getElementById('meta_patch') ? document.getElementById('meta_patch').value : 'live',
+      }),
+    });
+  } catch (_) {
+    // Background prioritization is best-effort only.
+  }
+}
+
+function switchResultTab(tabName) {
+  // Hide all panels
+  const panels = document.querySelectorAll('.tab-panel');
+  panels.forEach(p => p.classList.remove('active'));
+  
+  // Deactivate all buttons
+  const buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach(b => b.classList.remove('active'));
+  
+  // Show selected panel
+  const panel = document.getElementById(`tab-${tabName}`);
+  if (panel) panel.classList.add('active');
+  
+  // Activate selected button
+  const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+  if (btn) btn.classList.add('active');
+  
+  // If tab contains a chart, trigger resize (for Chart.js responsiveness)
+  if (window.scoreChart && scoreChart.resize) {
+    setTimeout(() => scoreChart.resize(), 100);
+  }
 }
 
 function prefetchIcon(url) {
@@ -442,6 +529,7 @@ document.getElementById('champList').addEventListener('click', (e) => {
 async function selectChamp(champ) {
   selectedChampion = champ.name;
   saveQuickSelection(CHAMPION_STORAGE_KEY, selectedChampion);
+  void prioritizeChampionPrefetch(champ.name);
   void applyChampionVisualTheme(champ);
   document.getElementById('champSelName').textContent = champ.name;
   const icon = document.getElementById('champSelIcon');
@@ -1999,6 +2087,7 @@ loadRuneCatalog();
 loadRuntimeCapabilities();
 loadOllamaModels();
 restoreQuickSelections();
+pollPrefetchStatus();
 
 if (window.lucide) { window.lucide.createIcons(); }
 

@@ -1,0 +1,13 @@
+services:
+  mcb-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcb-app:v1
+    container_name: mcb-app
+    environment:
+      FLASK_ENV: production
+      PORT: "5000"
+    ports:
+      - "5055:5000"
+    restart: unless-stopped

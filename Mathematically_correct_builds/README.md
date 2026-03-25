@@ -51,7 +51,7 @@ Current UI features include:
 
 ```powershell
 cd "c:\Users\Felix\.vscode\Python projects\Mathematically_correct_builds"
-& "c:/Users/Felix/.vscode/Python projects/.venv/Scripts/python.exe" -m pip install -r requirements.txt
+& ".\\.venv\\Scripts\\python.exe" -m pip install -r requirements.txt
 ```
 
 ## Run
@@ -60,7 +60,7 @@ cd "c:\Users\Felix\.vscode\Python projects\Mathematically_correct_builds"
 
 ```powershell
 cd "c:\Users\Felix\.vscode\Python projects\Mathematically_correct_builds"
-& "c:/Users/Felix/.vscode/Python projects/.venv/Scripts/python.exe" main.py
+& ".\\.venv\\Scripts\\python.exe" main.py
 ```
 
 Development mode uses the Flask dev server and binds to `http://127.0.0.1:5055`.
@@ -70,10 +70,35 @@ Development mode uses the Flask dev server and binds to `http://127.0.0.1:5055`.
 ```powershell
 cd "c:\Users\Felix\.vscode\Python projects\Mathematically_correct_builds"
 $env:FLASK_ENV = 'production'
-& "c:/Users/Felix/.vscode/Python projects/.venv/Scripts/python.exe" main.py
+& ".\\.venv\\Scripts\\python.exe" main.py
 ```
 
 Production mode uses Waitress and binds to `0.0.0.0:5055`.
+
+### Production-style Docker run (no cloud subscription required)
+
+```powershell
+cd "c:\Users\Felix\.vscode\Python projects\Mathematically_correct_builds"
+docker compose up --build -d
+```
+
+Then open:
+
+- `http://127.0.0.1:5055`
+- `http://127.0.0.1:5055/health`
+
+Stop the service:
+
+```powershell
+docker compose down
+```
+
+Or use helper scripts:
+
+```powershell
+.\scripts\start.ps1
+.\scripts\stop.ps1
+```
 
 ## Optional AI builds
 

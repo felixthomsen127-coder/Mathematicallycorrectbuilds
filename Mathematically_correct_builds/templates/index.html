@@ -13,11 +13,21 @@
 <body>
 <div class="wrap">
   <div class="card">
-    <div class="hero-content">
-      <div class="hero-title">Mathematically Correct Builds</div>
-      <p class="hero-sub">Pick a champion - Set objectives - Theoretically optimal builds</p>
-      <span class="patch-pill" id="patchPill">Loading...</span>
-      <div id="runtimeNotice" class="runtime-notice muted">Checking OCR fallback support...</div>
+    <div class="hero-shell">
+      <div class="hero-content">
+        <div class="hero-title">Mathematically Correct Builds</div>
+        <p class="hero-sub">Pick a champion, set a goal, and get a cleaner answer faster.</p>
+        <span class="patch-pill" id="patchPill">Loading...</span>
+        <div id="runtimeNotice" class="runtime-notice muted">Checking OCR fallback support...</div>
+      </div>
+      <aside class="prefetch-indicator" id="prefetchIndicator" aria-live="polite">
+        <div class="prefetch-label-row">
+          <span class="prefetch-title">Background cache</span>
+          <span class="prefetch-value" id="prefetchPct">0%</span>
+        </div>
+        <div class="prefetch-track"><div id="prefetchFill" class="prefetch-fill"></div></div>
+        <div class="prefetch-meta" id="prefetchMeta">Waiting to start...</div>
+      </aside>
     </div>
 
     <div id="champSplashBanner" class="champ-splash-banner" style="display:none;"></div>
@@ -38,7 +48,8 @@
       </div>
     </div>
 
-    <div class="grid">
+    <div class="section-heading">Core setup</div>
+    <div class="grid primary-grid">
       <label>Mode
         <select id="mode" onchange="onModeChange()">
           <option value="heuristic">heuristic - fast greedy single pass</option>
@@ -55,76 +66,12 @@
           <option value="support">support</option>
         </select>
       </label>
-      <label>Comparison mode
-        <select id="comparison_mode">
-          <option value="all" selected>all modes</option>
-          <option value="item_overlap">item overlap</option>
-          <option value="power_delta">power delta</option>
-          <option value="component_balance">component balance</option>
-        </select>
-      </label>
-      <label>Meta tier
-        <select id="meta_tier">
-          <option value="emerald_plus" selected>Emerald+</option>
-          <option value="diamond_plus">Diamond+</option>
-          <option value="master_plus">Master+</option>
-          <option value="platinum_plus">Platinum+</option>
-        </select>
-      </label>
-      <label>Meta region
-        <select id="meta_region">
-          <option value="global" selected>Global</option>
-          <option value="na">NA</option>
-          <option value="euw">EUW</option>
-          <option value="kr">KR</option>
-        </select>
-      </label>
-      <label>Meta patch
-        <select id="meta_patch">
-          <option value="live" selected>Live patch</option>
-        </select>
-      </label>
-      <label>Build size <input id="build_size" type="number" min="2" max="6" value="6" /></label>
-      <label>Candidate pool <input id="pool" type="number" min="8" max="30" value="16" /></label>
-      <label>Beam width <input id="beam" type="number" min="5" max="300" value="50" /></label>
-      <label>Compute backend
-        <select id="compute_backend">
-          <option value="auto" selected>auto (use GPU when available)</option>
-          <option value="gpu">gpu (CUDA)</option>
-          <option value="cpu">cpu only</option>
-        </select>
-      </label>
-      <label>Deep search
-        <select id="deep_search">
-          <option value="false" selected>false</option>
-          <option value="true">true</option>
-        </select>
-      </label>
-      <label>Extra restarts <input id="extra_restarts" type="number" min="0" max="24" value="0" /></label>
-      <label id="capLabel">Exhaustive cap (sec) <input id="cap" type="number" min="2" max="600" value="120" /></label>
-      <label id="saLabel">SA iterations <input id="sa_iters" type="number" min="10" max="500" value="70" /></label>
-      <label>Order permutation cap <input id="perm_cap" type="number" min="20" max="1000" value="150" /></label>
       <label title="Relative priority for this objective. 1.0 = standard priority, 0.0 = ignore, values above 1.0 increase emphasis.">Damage weight <input id="damage" type="number" step="0.1" value="1.0" title="Relative priority for raw damage output." /></label>
       <label title="Relative priority for this objective. 1.0 = standard priority, 0.0 = ignore, values above 1.0 increase emphasis.">Healing weight <input id="healing" type="number" step="0.1" value="0.0" title="Relative priority for healing and sustain." /></label>
       <label title="Relative priority for this objective. 1.0 = standard priority, 0.0 = ignore, values above 1.0 increase emphasis.">Tankiness weight <input id="tank" type="number" step="0.1" value="0.0" title="Relative priority for durability and effective health." /></label>
       <label title="Relative priority for this objective. 1.0 = standard priority, 0.0 = ignore, values above 1.0 increase emphasis.">Lifesteal weight <input id="ls" type="number" step="0.1" value="0.0" title="Relative priority for lifesteal and omnivamp-style sustain." /></label>
       <label title="Relative priority for utility pressure (ability uptime, control, and effective fight tools).">Utility weight <input id="utility" type="number" step="0.1" value="0.25" title="Relative priority for utility pressure." /></label>
       <label title="Relative priority for reliability across mixed fight windows.">Consistency weight <input id="consistency" type="number" step="0.1" value="0.1" title="Relative priority for consistent output." /></label>
-      <label>Must include (IDs/names)<input id="must_include" value="" /></label>
-      <label>Exclude (IDs/names)<input id="exclude" value="" /></label>
-      <label>Max total gold (optional)<input id="max_gold" type="number" min="1500" value="" /></label>
-      <label>Require boots
-        <select id="require_boots">
-          <option value="false" selected>false</option>
-          <option value="true">true</option>
-        </select>
-      </label>
-      <label>Force refresh this run
-        <select id="force_refresh">
-          <option value="false" selected>false</option>
-          <option value="true">true</option>
-        </select>
-      </label>
       <label>Enemy HP <input id="enemy_hp" type="number" min="500" value="3200" /></label>
       <label>Enemy Armor <input id="enemy_armor" type="number" min="0" value="120" /></label>
       <label>Enemy Magic Resist <input id="enemy_mr" type="number" min="0" value="90" /></label>
@@ -136,6 +83,80 @@
         </select>
       </label>
     </div>
+
+    <details class="advanced-panel">
+      <summary>Advanced controls</summary>
+      <div class="grid advanced-grid">
+        <label>Comparison mode
+          <select id="comparison_mode">
+            <option value="all" selected>all modes</option>
+            <option value="item_overlap">item overlap</option>
+            <option value="power_delta">power delta</option>
+            <option value="component_balance">component balance</option>
+          </select>
+        </label>
+        <label>Meta tier
+          <select id="meta_tier">
+            <option value="emerald_plus" selected>Emerald+</option>
+            <option value="diamond_plus">Diamond+</option>
+            <option value="master_plus">Master+</option>
+            <option value="platinum_plus">Platinum+</option>
+          </select>
+        </label>
+        <label>Meta region
+          <select id="meta_region">
+            <option value="global" selected>Global</option>
+            <option value="na">NA</option>
+            <option value="euw">EUW</option>
+            <option value="kr">KR</option>
+          </select>
+        </label>
+        <label>Meta patch
+          <select id="meta_patch">
+            <option value="live" selected>Live patch</option>
+          </select>
+        </label>
+        <label>Build size <input id="build_size" type="number" min="2" max="6" value="6" /></label>
+        <label>Candidate pool <input id="pool" type="number" min="8" max="30" value="16" /></label>
+        <label>Beam width <input id="beam" type="number" min="5" max="300" value="50" /></label>
+        <label>Compute backend
+          <select id="compute_backend">
+            <option value="auto" selected>auto (use GPU when available)</option>
+            <option value="gpu">gpu (CUDA)</option>
+            <option value="cpu">cpu only</option>
+          </select>
+        </label>
+        <label>Deep search
+          <select id="deep_search">
+            <option value="false" selected>false</option>
+            <option value="true">true</option>
+          </select>
+        </label>
+        <label>Extra restarts <input id="extra_restarts" type="number" min="0" max="24" value="0" /></label>
+        <label id="capLabel">Exhaustive cap (sec) <input id="cap" type="number" min="2" max="600" value="120" /></label>
+        <label id="saLabel">SA iterations <input id="sa_iters" type="number" min="10" max="500" value="70" /></label>
+        <label>Order permutation cap <input id="perm_cap" type="number" min="20" max="1000" value="150" /></label>
+        <label>Must include (IDs/names)<input id="must_include" value="" /></label>
+        <label>Exclude (IDs/names)<input id="exclude" value="" /></label>
+        <label>Max total gold (optional)<input id="max_gold" type="number" min="1500" value="" /></label>
+        <label>Require boots
+          <select id="require_boots">
+            <option value="false" selected>false</option>
+            <option value="true">true</option>
+          </select>
+        </label>
+        <label>Force refresh this run
+          <select id="force_refresh">
+            <option value="false" selected>false</option>
+            <option value="true">true</option>
+          </select>
+        </label>
+      </div>
+      <div class="advanced-textarea">
+        <label>Ability Override JSON (optional)</label>
+        <textarea id="ability_overrides" placeholder='{"q":{"ad_ratio":0.8},"w":{"ad_ratio":1.0},"passive":{"heal_ratio":0.25}}'></textarea>
+      </div>
+    </details>
 
     <div class="button-row">
       <button id="optimizeBtn" onclick="runOptimize()"><i data-lucide="settings-2"></i> Optimize Build</button>
@@ -151,11 +172,6 @@
       <div class="load-track"><div id="loadFill" class="load-fill"></div></div>
       <div id="loadPct" class="load-pct muted">0%</div>
       <div id="loadStepLog" class="load-step-log"></div>
-    </div>
-
-    <div style="margin-top:0.9rem;">
-      <label>Ability Override JSON (optional)</label>
-      <textarea id="ability_overrides" placeholder='{"q":{"ad_ratio":0.8},"w":{"ad_ratio":1.0},"passive":{"heal_ratio":0.25}}'></textarea>
     </div>
     <p id="status" class="muted"></p>
     <p id="error" class="err"></p>
@@ -237,11 +253,6 @@
     <div id="aiResult"></div>
   </div>
 
-  <div class="card result">
-    <h3>Parsed Ability Ratios</h3>
-    <div id="ability_breakdown" class="muted">No run yet.</div>
-  </div>
-
   <div class="card sim-section" id="simCard">
     <h3 style="margin-top:0;"><i data-lucide="zap"></i> Simulation</h3>
     <div class="sim-controls">
@@ -279,36 +290,48 @@
     <div id="simResultsEl" class="sim-results"></div>
   </div>
 
-  <div class="card result">
-    <h3>Top Weighted Results</h3>
-    <div class="chart-panel"><canvas id="scoreChart" height="120"></canvas></div>
-    <div id="rankedInsights" class="muted" style="margin-bottom:0.7rem;">No run yet.</div>
-    <div id="ranked" class="muted">No run yet.</div>
-  </div>
-
-  <div class="card result">
-    <h3>Build Story</h3>
-    <div id="buildStory" class="muted">Run an optimization to generate a concise explanation.</div>
-  </div>
-
-  <div class="card result">
-    <h3>Meta Comparison (U.GG / Blitz.gg / OP.GG)</h3>
-    <div id="metaComparison" class="muted">No run yet.</div>
-  </div>
-
-  <div class="card result">
-    <h3>Unknown OP Sweep</h3>
-    <div id="unknownOpResults" class="muted">No sweep yet.</div>
-  </div>
-
-  <div class="card result">
-    <h3>Checkpoint Best Builds</h3>
-    <div id="checkpoints" class="muted">No run yet.</div>
-  </div>
-
-  <div class="card result">
-    <h3>Pareto Frontier</h3>
-    <div id="pareto" class="muted">No run yet.</div>
+  <div class="card results-dashboard">
+    <h3 style="margin-top:0;">Results Dashboard</h3>
+    <div class="tabs-nav">
+      <button type="button" class="tab-btn active" data-tab="top-builds" onclick="switchResultTab('top-builds')"><i data-lucide="trending-up" style="width:16px;height:16px;display:inline;margin-right:6px;"></i>Top Builds</button>
+      <button type="button" class="tab-btn" data-tab="meta" onclick="switchResultTab('meta')"><i data-lucide="chart-line" style="width:16px;height:16px;display:inline;margin-right:6px;"></i>Meta Comparison</button>
+      <button type="button" class="tab-btn" data-tab="story" onclick="switchResultTab('story')"><i data-lucide="book-open" style="width:16px;height:16px;display:inline;margin-right:6px;"></i>Build Story</button>
+      <button type="button" class="tab-btn" data-tab="metrics" onclick="switchResultTab('metrics')"><i data-lucide="layers" style="width:16px;height:16px;display:inline;margin-right:6px;"></i>Metrics Detail</button>
+      <button type="button" class="tab-btn" data-tab="sweep" onclick="switchResultTab('sweep')"><i data-lucide="search" style="width:16px;height:16px;display:inline;margin-right:6px;"></i>Unknown OP</button>
+    </div>
+    
+    <div class="tab-panel active" id="tab-top-builds">
+      <div class="chart-panel"><canvas id="scoreChart" height="120"></canvas></div>
+      <div id="rankedInsights" class="muted" style="margin-bottom:0.7rem;">No run yet.</div>
+      <div id="ranked" class="muted">No run yet.</div>
+    </div>
+    
+    <div class="tab-panel" id="tab-meta">
+      <div id="metaComparison" class="muted">No run yet.</div>
+    </div>
+    
+    <div class="tab-panel" id="tab-story">
+      <div id="buildStory" class="muted">Run an optimization to generate a concise explanation.</div>
+    </div>
+    
+    <div class="tab-panel" id="tab-metrics">
+      <div style="margin-bottom:1.2rem;">
+        <h4 style="margin-top:0;margin-bottom:0.5rem;">Parsed Ability Ratios</h4>
+        <div id="ability_breakdown" class="muted">No run yet.</div>
+      </div>
+      <div style="margin-bottom:1.2rem;">
+        <h4 style="margin-top:0;margin-bottom:0.5rem;">Checkpoint Best Builds</h4>
+        <div id="checkpoints" class="muted">No run yet.</div>
+      </div>
+      <div>
+        <h4 style="margin-top:0;margin-bottom:0.5rem;">Pareto Frontier</h4>
+        <div id="pareto" class="muted">No run yet.</div>
+      </div>
+    </div>
+    
+    <div class="tab-panel" id="tab-sweep">
+      <div id="unknownOpResults" class="muted">No sweep yet.</div>
+    </div>
   </div>
 </div>
 
