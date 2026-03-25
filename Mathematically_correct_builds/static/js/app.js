@@ -1226,8 +1226,12 @@ function runePageHtml(runePage) {
     const options = Array.isArray(row) ? row : [];
     const chips = options.map((opt) => {
       const optName = String((opt && opt.name) || 'Shard');
+      const iconUrl = String((opt && opt.icon_url) || '').trim();
       const selected = selectedShards.has(normalizeRuneToken(optName));
-      return `<span class="rune-shard${selected ? ' rune-shard-selected' : ''}" title="${escHtml(optName)}">${escHtml(runeGlyph(optName))}</span>`;
+      const iconHtml = iconUrl
+        ? `<img class="shard-icon" src="${escHtml(iconUrl)}" alt="${escHtml(optName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" /><span class="shard-glyph" style="display:none">${escHtml(runeGlyph(optName))}</span>`
+        : `<span class="shard-glyph">${escHtml(runeGlyph(optName))}</span>`;
+      return `<span class="rune-shard${selected ? ' rune-shard-selected' : ''}" title="${escHtml(optName)}">${iconHtml}</span>`;
     }).join('');
     return `<div class="rune-shard-row">${chips}</div>`;
   }).join('');

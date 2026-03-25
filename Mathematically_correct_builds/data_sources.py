@@ -852,12 +852,16 @@ class WikiScalingParser:
 
     AP_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:AP|ability\s*power)", re.IGNORECASE)
     AD_PATTERN = re.compile(
-        r"(\d+(?:\.\d+)?)\s*%\s*(?:(?:bonus|total)\s+)?(?:AD|bAD|tAD|attack\s*damage)",
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:(?:bonus|total)\s+)?(?:AD|bAD|tAD|attack\s*damage)",
         re.IGNORECASE,
     )
-    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*attack\s*speed", re.IGNORECASE)
-    MS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:bonus\s+)?(?:movement\s*speed|move\s*speed)", re.IGNORECASE)
-    HEAL_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:missing\s+health|max\s+health|health)", re.IGNORECASE)
+    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?attack\s*speed", re.IGNORECASE)
+    MS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:bonus\s+)?(?:movement\s*speed|move\s*speed)", re.IGNORECASE)
+    HEAL_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:missing|max(?:imum)?|current|bonus)?\s*(?:health|HP)", re.IGNORECASE)
+    HP_PATTERN = re.compile(
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:maximum|max|missing|current|bonus)?\s*(?:health|HP|hit\s*points)",
+        re.IGNORECASE,
+    )
     TOKEN_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     PCT_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
     KEY_PATTERNS = {
@@ -1318,8 +1322,8 @@ class WikiScalingParser:
                     "ap_ratio": float(all_ratios.get("ap_ratio", 0.0)),
                     "attack_speed_ratio": float(all_ratios.get("attack_speed_ratio", 0.0)),
                     "heal_ratio": float(all_ratios.get("heal_ratio", 0.0)),
-                    "hp_ratio": 0.0,
-                    "bonus_hp_ratio": 0.0,
+                    "hp_ratio": float(all_ratios.get("hp_ratio", 0.0)),
+                    "bonus_hp_ratio": float(all_ratios.get("bonus_hp_ratio", 0.0)),
                     "armor_ratio": 0.0,
                     "mr_ratio": 0.0,
                     "scaling_components": components,
@@ -1352,8 +1356,8 @@ class WikiScalingParser:
                 "ap_ratio": float(ratios.get("ap_ratio", 0.0)),
                 "attack_speed_ratio": float(ratios.get("attack_speed_ratio", 0.0)),
                 "heal_ratio": float(ratios.get("heal_ratio", 0.0)),
-                "hp_ratio": 0.0,
-                "bonus_hp_ratio": 0.0,
+                "hp_ratio": float(ratios.get("hp_ratio", 0.0)),
+                "bonus_hp_ratio": float(ratios.get("bonus_hp_ratio", 0.0)),
                 "armor_ratio": 0.0,
                 "mr_ratio": 0.0,
                 "scaling_components": components,
@@ -1596,15 +1600,31 @@ class WikiScalingParser:
         payload = {
             "model": "mistral",
             "prompt": json.dumps(instruction, ensure_ascii=True),
-            "stream": False,
+            "stream": True,
             "format": "json",
             "options": {"temperature": 0.1, "num_predict": 900},
         }
 
         try:
-            res = requests.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=min(self.timeout_seconds, 8.0))
+            res = requests.post(
+                "http://127.0.0.1:11434/api/generate",
+                json=payload,
+                stream=True,
+                timeout=min(self.timeout_seconds, 60.0),
+            )
             res.raise_for_status()
-            raw = str(res.json().get("response", "") or "")
+            raw_parts: List[str] = []
+            for line in res.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    raw_parts.append(str(chunk.get("response", "") or ""))
+                    if chunk.get("done"):
+                        break
+                except Exception:
+                    continue
+            raw = "".join(raw_parts)
             if not raw:
                 return {}
             parsed: Any
@@ -1895,6 +1915,27 @@ class WikiScalingParser:
         ms_values = [float(v) for v in self.MS_PATTERN.findall(cleaned)]
         heal_values = [float(v) for v in self.HEAL_PATTERN.findall(cleaned)]
 
+        # Extract HP-scaling values separately so abilities like Garen R (% max HP
+        # damage) are captured in hp_ratio rather than conflated with heal_ratio.
+        hp_all = [float(v) for v in self.HP_PATTERN.findall(cleaned)]
+        # Bonus HP scalings typically appear as "bonus health" in the text.
+        bonus_hp_values: List[float] = []
+        hp_values: List[float] = []
+        lower_cleaned = cleaned.lower()
+        for m in self.HP_PATTERN.finditer(cleaned):
+            val = float(m.group(1))
+            context_start = max(0, m.start() - 40)
+            context = lower_cleaned[context_start : m.end() + 40]
+            if "bonus" in context:
+                bonus_hp_values.append(val)
+            else:
+                hp_values.append(val)
+        # Values that already appeared in heal_values (heal/restore context) should
+        # stay as heal_ratio; strip them from hp extraction to avoid double-counting.
+        heal_set = set(round(v, 4) for v in heal_values)
+        hp_values = [v for v in hp_values if round(v, 4) not in heal_set]
+        bonus_hp_values = [v for v in bonus_hp_values if round(v, 4) not in heal_set]
+
         # Support wiki value-box formats where stat label appears before the percentage list.
         as_values.extend(self._extract_keyword_series_pct(cleaned, r"attack\s*speed"))
         ms_values.extend(self._extract_keyword_series_pct(cleaned, r"(?:movement|move)\s*speed"))
@@ -1907,6 +1948,8 @@ class WikiScalingParser:
             "attack_speed_ratio": self._normalize_pct(as_values, fallback=0.0),
             "ms_ratio": self._normalize_pct(ms_values, fallback=0.0),
             "heal_ratio": self._normalize_pct(heal_values, fallback=0.0),
+            "hp_ratio": self._normalize_pct(hp_values, fallback=0.0),
+            "bonus_hp_ratio": self._normalize_pct(bonus_hp_values, fallback=0.0),
         }
 
     def _extract_keyword_series_pct(self, text: str, keyword_pattern: str) -> List[float]:
@@ -1942,7 +1985,9 @@ class WikiScalingParser:
         text = self._normalize_wiki_markup_text(text)
 
         pattern = re.compile(
-            r"(\d+(?:\.\d+)?)\s*%\s*((?:bonus|total)\s+)?(AD|bAD|tAD|attack\s*damage|AP|ability\s*power|attack\s*speed|movement\s*speed|move\s*speed|armor|magic\s*resist|mr|bonus\s*health|max\s*health|health)",
+            r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?"
+            r"((?:bonus|total)\s+)?"
+            r"(AD|bAD|tAD|attack\s*damage|AP|ability\s*power|attack\s*speed|movement\s*speed|move\s*speed|armor|magic\s*resist|mr|bonus\s*health|max(?:imum)?\s*health|missing\s*health|health|HP)",
             re.IGNORECASE,
         )
         lower = text.lower()
@@ -1976,7 +2021,13 @@ class WikiScalingParser:
             elif "bonus health" in stat_token:
                 stat = "bonus_hp"
                 modifier = "total"
-            elif "max health" in stat_token or stat_token == "health":
+            elif "missing health" in stat_token or "missing hp" in stat_token:
+                stat = "hp"
+                modifier = "missing"
+            elif "max" in stat_token and ("health" in stat_token or "hp" in stat_token):
+                stat = "bonus_hp" if modifier_token.startswith("bonus") else "hp"
+                modifier = "max"
+            elif "health" in stat_token or stat_token == "hp" or stat_token == "hit points":
                 stat = "bonus_hp" if modifier_token.startswith("bonus") else "hp"
                 modifier = "total"
             elif "armor" in stat_token:
@@ -2302,6 +2353,8 @@ class WikiScalingParser:
             "ap_ratio": 0.0,
             "attack_speed_ratio": 0.0,
             "heal_ratio": 0.0,
+            "hp_ratio": 0.0,
+            "bonus_hp_ratio": 0.0,
         }
         if not isinstance(vars_block, list):
             return out
@@ -2317,11 +2370,19 @@ class WikiScalingParser:
             value = max(coeff_values)
             if "spelldamage" in link or "abilitypower" in link or link == "ap":
                 out["ap_ratio"] = max(out["ap_ratio"], value)
-            elif "bonusattackdamage" in link or "attackdamage" in link or link in {"ad", "bonusad"}:
+            elif "bonusattackdamage" in link or link in {"bonusad"}:
+                out["ad_ratio"] = max(out["ad_ratio"], value)
+            elif "attackdamage" in link or link == "ad":
                 out["ad_ratio"] = max(out["ad_ratio"], value)
             elif "attackspeed" in link:
                 out["attack_speed_ratio"] = max(out["attack_speed_ratio"], value)
-            elif "health" in link or "missinghealth" in link:
+            elif "bonushealth" in link:
+                out["bonus_hp_ratio"] = max(out["bonus_hp_ratio"], value)
+            elif "maxhealth" in link or "currenthealth" in link:
+                out["hp_ratio"] = max(out["hp_ratio"], value)
+            elif "missinghealth" in link:
+                out["hp_ratio"] = max(out["hp_ratio"], value)
+            elif "health" in link:
                 out["heal_ratio"] = max(out["heal_ratio"], value)
         return out
 
@@ -2528,7 +2589,7 @@ class OllamaClient:
     BASE = "http://localhost:11434"
     MAX_FEEDBACK_PER_CHAMP = 50
 
-    def __init__(self, timeout_seconds: float = 60.0):
+    def __init__(self, timeout_seconds: float = 180.0):
         self.timeout_seconds = timeout_seconds
         self.cache = LocalJsonCache()
 
@@ -2565,13 +2626,32 @@ class OllamaClient:
         payload = {
             "model": model,
             "prompt": prompt,
-            "stream": False,
+            "stream": True,
             "format": "json",
             "options": {"temperature": 0.45, "num_predict": 900},
         }
-        res = requests.post(f"{self.BASE}/api/generate", json=payload, timeout=self.timeout_seconds)
+        # Use streaming to avoid read timeouts on slow hardware.  Each streamed
+        # chunk is a small JSON line so the connection stays alive while the LLM
+        # generates tokens, and we accumulate the full response text ourselves.
+        res = requests.post(
+            f"{self.BASE}/api/generate",
+            json=payload,
+            stream=True,
+            timeout=self.timeout_seconds,
+        )
         res.raise_for_status()
-        raw = res.json().get("response", "{}")
+        raw_parts: List[str] = []
+        for line in res.iter_lines():
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                raw_parts.append(str(chunk.get("response", "") or ""))
+                if chunk.get("done"):
+                    break
+            except Exception:
+                continue
+        raw = "".join(raw_parts)
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:

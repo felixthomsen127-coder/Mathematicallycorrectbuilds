@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 from threading import Lock, Thread
 import time
@@ -129,19 +130,19 @@ _CHAMPION_SLUG_INDEX: Dict[str, Any] = {
 
 _DEFAULT_SHARD_OPTIONS: List[List[Dict[str, str]]] = [
   [
-    {"id": "5008", "name": "Adaptive Force"},
-    {"id": "5005", "name": "Attack Speed"},
-    {"id": "5007", "name": "Ability Haste"},
+    {"id": "5008", "name": "Adaptive Force", "icon_url": "/api/icon/shard/5008"},
+    {"id": "5005", "name": "Attack Speed", "icon_url": "/api/icon/shard/5005"},
+    {"id": "5007", "name": "Ability Haste", "icon_url": "/api/icon/shard/5007"},
   ],
   [
-    {"id": "5008b", "name": "Adaptive Force"},
-    {"id": "5002", "name": "Movement Speed"},
-    {"id": "5003", "name": "Scaling Health"},
+    {"id": "5008b", "name": "Adaptive Force", "icon_url": "/api/icon/shard/5008"},
+    {"id": "5002", "name": "Armor", "icon_url": "/api/icon/shard/5002"},
+    {"id": "5003", "name": "Magic Resist", "icon_url": "/api/icon/shard/5003"},
   ],
   [
-    {"id": "5011", "name": "Health"},
-    {"id": "5013", "name": "Tenacity and Slow Resist"},
-    {"id": "5001", "name": "Health Scaling"},
+    {"id": "5011", "name": "Health", "icon_url": "/api/icon/shard/5011"},
+    {"id": "5013", "name": "Tenacity and Slow Resist", "icon_url": "/api/icon/shard/5013"},
+    {"id": "5001", "name": "Health Scaling", "icon_url": "/api/icon/shard/5001"},
   ],
 ]
 
@@ -1574,6 +1575,35 @@ def api_icon_rune(rune_token: str) -> Any:
             return jsonify({"error": "icon not found"}), 404
         cache_token = _safe_token(token.lower().replace(" ", "_")) or "rune"
         icon_path = _cache_icon_from_wiki(remote_url, "rune", cache_token)
+        return send_file(icon_path, mimetype="image/png", max_age=60 * 60 * 24 * 30)
+    except Exception:
+        return jsonify({"error": "icon not found"}), 404
+
+
+# Map stat shard IDs to their DDragon StatMods image filenames.
+_SHARD_ID_TO_DDRAGON_FILE: Dict[str, str] = {
+    "5001": "StatModsHealthScalingIcon.png",
+    "5002": "StatModsArmorIcon.png",
+    "5003": "StatModsMagicResIcon.MagicResist.png",
+    "5005": "StatModsAttackSpeedIcon.png",
+    "5007": "StatModsCDRScalingIcon.png",
+    "5008": "StatModsAdaptiveForceIcon.png",
+    "5011": "StatModsHealthPlusIcon.png",
+    "5013": "StatModsTenacityIcon.Tenacity.png",
+}
+
+
+@app.get("/api/icon/shard/<path:shard_id>")
+def api_icon_shard(shard_id: str) -> Any:
+    normalized = str(shard_id or "").strip().rstrip(".png").lower()
+    # Strip any trailing .png extension from the route token
+    clean_id = re.sub(r"\.png$", "", normalized)
+    ddragon_file = _SHARD_ID_TO_DDRAGON_FILE.get(clean_id)
+    if not ddragon_file:
+        return jsonify({"error": "shard not found"}), 404
+    try:
+        remote_url = f"https://ddragon.leagueoflegends.com/cdn/img/perk-images/StatMods/{ddragon_file}"
+        icon_path = _cache_remote_asset(remote_url, "shard", f"shard_{clean_id}", ".png")
         return send_file(icon_path, mimetype="image/png", max_age=60 * 60 * 24 * 30)
     except Exception:
         return jsonify({"error": "icon not found"}), 404
