@@ -804,8 +804,6 @@ class LeagueWikiClient:
         out["flat_armor_pen"] = LeagueWikiClient._extract_flat_pen(text, "lethality")
         if "omnivamp" in text and "life steal" in text:
             out["damage_amp"] += 0.02
-        if "on-hit" in text:
-            out["bonus_true_damage"] += 8.0
         if "health" in text and "damage" in text and "max" in text:
             out["max_hp_damage"] = max(out["max_hp_damage"], 0.02)
 
@@ -855,7 +853,10 @@ class WikiScalingParser:
         r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:(?:bonus|total)\s+)?(?:AD|bAD|tAD|attack\s*damage)",
         re.IGNORECASE,
     )
-    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?attack\s*speed", re.IGNORECASE)
+    # Only match "X% of [pronoun?] attack speed" to capture genuine damage-scaling
+    # coefficients.  Plain "X% attack speed" phrases describe attack-speed BUFFS
+    # (e.g. "gains 80% attack speed") and must NOT be extracted as damage ratios.
+    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s+of\s+(?:(?:his|her|their|the|target'?s?)\s+)?attack\s*speed", re.IGNORECASE)
     MS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:bonus\s+)?(?:movement\s*speed|move\s*speed)", re.IGNORECASE)
     HEAL_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:missing|max(?:imum)?|current|bonus)?\s*(?:health|HP)", re.IGNORECASE)
     HP_PATTERN = re.compile(
@@ -1905,7 +1906,6 @@ class WikiScalingParser:
         return " ".join(text.split())
 
     def _extract_ratio_values(self, text: str) -> Dict[str, float]:
-        as_labeled = self._extract_labeled_template_series_pct(text, r"bonus\s+attack\s+speed|attack\s+speed")
         ms_labeled = self._extract_labeled_template_series_pct(text, r"bonus\s+(?:movement|move)\s+speed|(?:movement|move)\s+speed")
 
         cleaned = self._normalize_wiki_markup_text(text)
@@ -1937,9 +1937,11 @@ class WikiScalingParser:
         bonus_hp_values = [v for v in bonus_hp_values if round(v, 4) not in heal_set]
 
         # Support wiki value-box formats where stat label appears before the percentage list.
-        as_values.extend(self._extract_keyword_series_pct(cleaned, r"attack\s*speed"))
+        # NOTE: attack-speed extraction is intentionally omitted here because "attack speed"
+        # appears in buff-granting ability text (e.g. "gains 40% attack speed") which
+        # would be incorrectly read as a damage-scaling coefficient.  AS_PATTERN already
+        # uses a strict "X% of attack speed" form to avoid this false-positive extraction.
         ms_values.extend(self._extract_keyword_series_pct(cleaned, r"(?:movement|move)\s*speed"))
-        as_values.extend(as_labeled)
         ms_values.extend(ms_labeled)
 
         return {
