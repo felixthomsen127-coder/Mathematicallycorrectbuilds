@@ -362,7 +362,8 @@ async function applyChampionVisualTheme(champ) {
   // Show splash banner
   if (banner) {
     banner.style.display = 'block';
-    banner.style.backgroundImage = `url("${splashUrl.replace(/\"/g, '\\"')}")`;
+    const escapedUrl = splashUrl.replace(/\\/g, '\\\\').replace(/\"/g, '\\"');
+    banner.style.backgroundImage = `url("${escapedUrl}")`;
     banner.classList.remove('visible');
     // Trigger fade-in on next frame
     requestAnimationFrame(() => { requestAnimationFrame(() => { banner.classList.add('visible'); }); });
