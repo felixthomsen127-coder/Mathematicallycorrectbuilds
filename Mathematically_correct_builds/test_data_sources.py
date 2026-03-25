@@ -97,7 +97,9 @@ def test_briar_preserves_mixed_ad_ap_and_utility_scalings(monkeypatch):
     assert float(e.get("ad_ratio", 0.0) or 0.0) > 0.0
     assert float(e.get("ap_ratio", 0.0) or 0.0) > 0.0
 
-    # Briar utility patterns include AS/MS scaling.
+    # Briar utility patterns include AS/MS scaling from structured template data.
+    # attack_speed_ratio comes from the mocked _extract_from_wiki_templates breakdown
+    # (attack_speed=0.15), not from text parsing of "W grants attack speed".
     assert float(w.get("attack_speed_ratio", 0.0) or 0.0) > 0.0
     assert float(w.get("ms_ratio", 0.0) or 0.0) > 0.0
 
