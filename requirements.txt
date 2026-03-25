@@ -1,0 +1,12 @@
+flask>=3.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12
+requests-cache>=1.2
+tenacity>=9.0
+flask-compress>=1.15
+waitress>=3.0
+orjson>=3.10
+flask-caching>=2.3
+Pillow>=11.0
+pytesseract>=0.3.13
+numba>=0.60; python_version < "3.14"
