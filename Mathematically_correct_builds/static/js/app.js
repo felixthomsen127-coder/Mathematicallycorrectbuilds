@@ -346,15 +346,28 @@ async function applyChampionVisualTheme(champ) {
   }
   splashThemeController = new AbortController();
 
+  const banner = document.getElementById('champSplashBanner');
+
   if (!splashUrl) {
     root.style.setProperty('--champion-splash-url', 'none');
     applyChampionPaletteVars(null);
     document.body.classList.remove('splash-ready');
+    if (banner) { banner.style.display = 'none'; banner.classList.remove('visible'); }
     return;
   }
 
   root.style.setProperty('--champion-splash-url', `url("${splashUrl.replace(/\"/g, '\\\"')}")`);
   document.body.classList.remove('splash-ready');
+
+  // Show splash banner
+  if (banner) {
+    banner.style.display = 'block';
+    const escapedUrl = splashUrl.replace(/\\/g, '\\\\').replace(/\"/g, '\\"');
+    banner.style.backgroundImage = `url("${escapedUrl}")`;
+    banner.classList.remove('visible');
+    // Trigger fade-in on next frame
+    requestAnimationFrame(() => { requestAnimationFrame(() => { banner.classList.add('visible'); }); });
+  }
 
   try {
     const palette = await extractSplashPalette(splashUrl, splashThemeController.signal, champ);
@@ -866,6 +879,12 @@ function showLoadingPanel(show) {
   const panel = document.getElementById('loadingPanel');
   if (!panel) return;
   panel.style.display = show ? 'block' : 'none';
+  if (show) {
+    // Reset step log when a new run starts
+    const stepLog = document.getElementById('loadStepLog');
+    if (stepLog) stepLog.innerHTML = '';
+    _lastLoadPhase = '';
+  }
 }
 
 function formatEta(seconds) {
@@ -878,6 +897,8 @@ function formatEta(seconds) {
   return `ETA ${Math.round(seconds)}s`;
 }
 
+let _lastLoadPhase = '';
+
 function setLoadState(data) {
   const running = data.status === 'running';
   let pct = Number(data.progress_percent || 0);
@@ -889,8 +910,18 @@ function setLoadState(data) {
   const phase = document.getElementById('loadPhase');
   const eta = document.getElementById('loadEta');
   const pctEl = document.getElementById('loadPct');
+  const stepLog = document.getElementById('loadStepLog');
   if (fill) fill.style.width = `${pct}%`;
-  if (phase) phase.textContent = data.phase || 'Running optimization...';
+
+  const phaseText = data.phase || 'Running optimization...';
+  if (phase) {
+    if (running) {
+      phase.textContent = phaseText;
+    } else {
+      phase.textContent = phaseText;
+    }
+  }
+
   if (eta) {
     if (data.status === 'complete') {
       const elapsed = Number(data.elapsed_seconds || 0);
@@ -902,6 +933,24 @@ function setLoadState(data) {
     }
   }
   if (pctEl) pctEl.textContent = `${pct}% complete`;
+
+  // Append new phase step to the step log
+  if (stepLog && phaseText && phaseText !== _lastLoadPhase) {
+    _lastLoadPhase = phaseText;
+    // Mark all existing items as non-current
+    stepLog.querySelectorAll('.load-step-item.current').forEach(el => el.classList.remove('current'));
+    const item = document.createElement('div');
+    item.className = 'load-step-item current';
+    item.textContent = `› ${phaseText}`;
+    stepLog.appendChild(item);
+    // Keep only last 6 steps
+    const items = stepLog.querySelectorAll('.load-step-item');
+    if (items.length > 6) {
+      for (let i = 0; i < items.length - 6; i++) {
+        stepLog.removeChild(items[i]);
+      }
+    }
+  }
 }
 
 async function waitForOptimizeResult(jobId) {
