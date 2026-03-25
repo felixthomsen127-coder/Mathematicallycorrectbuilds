@@ -406,10 +406,10 @@ def _find_item_id_arrays(
 ) -> List[List[str]]:
     """Walk any parsed JSON value and return resolved item-name lists.
 
-    Looks for lists of 4-7 integers (or integer-valued strings) all in the LoL
-    item-ID range (1001-7999), or objects with ``itemId``/``item_id`` keys.
+    Looks for lists of 3-8 integers (or integer-valued strings) all in the LoL
+    item-ID range (1001-8999), or objects with ``itemId``/``item_id`` keys.
     Uses item_id_to_name to resolve IDs to English names.  Emits a build only
-    if at least 4 IDs resolve to real names.  Bounded by a node-visit cap so
+    if at least 3 IDs resolve to real names.  Bounded by a node-visit cap so
     large Next.js payloads don't stall.
     """
     results: List[List[str]] = []
@@ -420,19 +420,27 @@ def _find_item_id_arrays(
         """Try to parse val as a LoL item ID integer."""
         try:
             i = int(val)
-            if 1001 <= i <= 7999:
+            if 1001 <= i <= 8999:
                 return i
         except (TypeError, ValueError):
             pass
         return None
 
+    def _try_add_names(int_vals: List[int]) -> None:
+        names = [item_id_to_name[str(v)] for v in int_vals if str(v) in item_id_to_name]
+        if len(names) >= 3:
+            key = tuple(sorted(names))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                results.append(names[:6])
+
     def _visit(node: Any, depth: int) -> None:
-        if visited[0] > 30_000 or len(results) >= 50:
+        if visited[0] > 80_000 or len(results) >= 50:
             return
         visited[0] += 1
         if isinstance(node, list):
             # Case 1: list of integers or integer-strings (e.g. [6632, 3036, ...])
-            if 4 <= len(node) <= 7:
+            if 3 <= len(node) <= 8:
                 int_vals = []
                 all_valid = True
                 for x in node:
@@ -442,37 +450,28 @@ def _find_item_id_arrays(
                     else:
                         all_valid = False
                         break
-                if all_valid and len(int_vals) >= 4:
-                    names = [item_id_to_name[str(v)] for v in int_vals if str(v) in item_id_to_name]
-                    if len(names) >= 4:
-                        key = tuple(sorted(names))
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            results.append(names[:6])
+                if all_valid and int_vals:
+                    _try_add_names(int_vals)
             # Case 2: list of objects with itemId fields (e.g. [{"itemId": 6632}, ...])
-            if 4 <= len(node) <= 7:
+            if 3 <= len(node) <= 8:
                 obj_ids = []
                 for x in node:
                     if isinstance(x, dict):
-                        for field in ("itemId", "item_id", "id", "ItemId"):
+                        for field in ("itemId", "item_id", "id", "ItemId", "itemID"):
                             item_id = _to_item_id(x.get(field))
                             if item_id is not None:
                                 obj_ids.append(item_id)
                                 break
-                if len(obj_ids) >= 4:
-                    names = [item_id_to_name[str(v)] for v in obj_ids if str(v) in item_id_to_name]
-                    if len(names) >= 4:
-                        key = tuple(sorted(names))
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            results.append(names[:6])
+                if obj_ids:
+                    _try_add_names(obj_ids)
             for child in node:
                 _visit(child, depth + 1)
         elif isinstance(node, dict):
             # Case 3: dict with "items" or "itemIds" key containing an ID list
-            for build_key in ("items", "item_ids", "itemIds", "item_list", "build"):
+            for build_key in ("items", "item_ids", "itemIds", "item_list", "build",
+                              "recommendedItems", "coreItems", "fullBuild", "finalItems"):
                 arr = node.get(build_key)
-                if isinstance(arr, list) and 4 <= len(arr) <= 7:
+                if isinstance(arr, list) and 3 <= len(arr) <= 8:
                     int_vals = []
                     all_valid = True
                     for x in arr:
@@ -482,13 +481,8 @@ def _find_item_id_arrays(
                         else:
                             all_valid = False
                             break
-                    if all_valid and len(int_vals) >= 4:
-                        names = [item_id_to_name[str(v)] for v in int_vals if str(v) in item_id_to_name]
-                        if len(names) >= 4:
-                            key = tuple(sorted(names))
-                            if key not in seen_keys:
-                                seen_keys.add(key)
-                                results.append(names[:6])
+                    if all_valid and int_vals:
+                        _try_add_names(int_vals)
             for child in node.values():
                 _visit(child, depth + 1)
 
@@ -668,20 +662,10 @@ class UggMetaClient:
                             )
                     # Without an ID map, skip raw numeric strings entirely.
 
-        # Final fallback: infer item names from alt/title/visible text when
-        # structured JSON and ID-URL extraction both fail.
-        if not out and _id_map:
-            visual_rows = _extract_item_names_from_visual_text(html, _id_map)
-            for row in visual_rows:
-                out.append(
-                    MetaBuildSample(
-                        source=source_label,
-                        label="visual-text-fallback",
-                        item_names=row,
-                    )
-                )
-
         # OCR fallback: handles image/text-rendered builds when all parsers fail.
+        # Note: visual-text-fallback is intentionally omitted here — it matches item
+        # names from anywhere on the page (navigation, ads, sidebars) and produces
+        # the same false-positive item list for every champion.  OCR is more targeted.
         if not out and _id_map:
             ocr_rows = _extract_item_names_from_ocr(html, _id_map)
             for row in ocr_rows:

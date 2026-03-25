@@ -216,17 +216,17 @@ def test_ai_fallback_fills_missing_signals_from_wiki_sections(monkeypatch):
         def raise_for_status(self):
             return None
 
-        def json(self):
-            return {
-                "response": json.dumps(
-                    {
-                        "q": {"ap_ratio": 80, "base_damage": [70, 110, 150], "cooldown": [8, 7, 6]},
-                        "w": {"ad_ratio": 20, "cooldown": [12, 11, 10]},
-                        "e": {"ad_ratio": 15, "cooldown": [16, 15, 14]},
-                        "r": {"ap_ratio": 60, "cooldown": [120, 100, 80]},
-                    }
-                )
-            }
+        def iter_lines(self):
+            payload = json.dumps(
+                {
+                    "q": {"ap_ratio": 80, "base_damage": [70, 110, 150], "cooldown": [8, 7, 6]},
+                    "w": {"ad_ratio": 20, "cooldown": [12, 11, 10]},
+                    "e": {"ad_ratio": 15, "cooldown": [16, 15, 14]},
+                    "r": {"ap_ratio": 60, "cooldown": [120, 100, 80]},
+                }
+            )
+            yield json.dumps({"response": payload, "done": False}).encode()
+            yield json.dumps({"response": "", "done": True}).encode()
 
     monkeypatch.setattr("data_sources.requests.post", lambda *args, **kwargs: _FakeAiResponse())
 

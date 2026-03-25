@@ -251,6 +251,11 @@ class BuildOptimizer:
         self.items = list(items)
         self.rune_pages = list(rune_pages) if rune_pages else self._default_rune_pages()
         self._active_compute_backend = "cpu"
+        # Pre-allocated GPU device arrays reused across _batch_prescore calls to
+        # avoid per-call CUDA memory allocation overhead.
+        self._gpu_d_stats: Any = None
+        self._gpu_d_out: Any = None
+        self._gpu_alloc_size: int = 0
 
     def get_compute_backend(self) -> str:
         return self._active_compute_backend
@@ -1324,40 +1329,46 @@ class BuildOptimizer:
         if np is None:
             return self._batch_prescore_python(builds, weights, enemy)
 
-        rows: List[List[float]] = []
-        for build in builds:
-            rows.append([
-                float(sum(x.ad for x in build)),
-                float(sum(x.ap for x in build)),
-                float(sum(x.attack_speed for x in build)),
-                float(self.champion.base_hp + sum(x.hp for x in build)),
-                float(self.champion.base_armor + sum(x.armor for x in build)),
-                float(self.champion.base_mr + sum(x.mr for x in build)),
-                float(sum(x.ability_haste for x in build)),
-                float(sum(x.lifesteal for x in build)),
-                float(sum(x.omnivamp for x in build)),
-                float(sum(x.damage_amp for x in build)),
-                float(sum(x.armor_pen for x in build)),
-                float(sum(x.magic_pen for x in build)),
-                float(sum(x.max_hp_damage for x in build)),
-                float(sum(x.bonus_true_damage for x in build)),
-            ])
+        n = len(builds)
+        # Build stats matrix: vectorized column sums using numpy.
+        # Each row is a 14-float stat vector for one build.
+        stats = np.empty((n, 14), dtype=np.float32)
+        base_hp = float(self.champion.base_hp)
+        base_armor = float(self.champion.base_armor)
+        base_mr = float(self.champion.base_mr)
+        for i, build in enumerate(builds):
+            stats[i, 0] = sum(x.ad for x in build)
+            stats[i, 1] = sum(x.ap for x in build)
+            stats[i, 2] = sum(x.attack_speed for x in build)
+            stats[i, 3] = base_hp + sum(x.hp for x in build)
+            stats[i, 4] = base_armor + sum(x.armor for x in build)
+            stats[i, 5] = base_mr + sum(x.mr for x in build)
+            stats[i, 6] = sum(x.ability_haste for x in build)
+            stats[i, 7] = sum(x.lifesteal for x in build)
+            stats[i, 8] = sum(x.omnivamp for x in build)
+            stats[i, 9] = sum(x.damage_amp for x in build)
+            stats[i, 10] = sum(x.armor_pen for x in build)
+            stats[i, 11] = sum(x.magic_pen for x in build)
+            stats[i, 12] = sum(x.max_hp_damage for x in build)
+            stats[i, 13] = sum(x.bonus_true_damage for x in build)
 
-        stats = np.asarray(rows, dtype=np.float32)
         ad_ratio, ap_ratio = self._effective_spike_ratios()
         phys_frac, magic_frac, _ = self._detect_champion_damage_profile(self.champion.ability_breakdown or {})
         advanced_signals = self._advanced_ability_signals()
 
         if backend == "gpu" and _NUMBA_CUDA_AVAILABLE and _gpu_prescore_kernel is not None:
             try:
-                out = np.zeros((stats.shape[0],), dtype=np.float32)
-                d_stats = _CUDA.to_device(stats)
-                d_out = _CUDA.to_device(out)
+                # Reuse pre-allocated device arrays when the batch size hasn't grown.
+                if n > self._gpu_alloc_size:
+                    self._gpu_d_stats = _CUDA.device_array((n, 14), dtype=np.float32)
+                    self._gpu_d_out = _CUDA.device_array((n,), dtype=np.float32)
+                    self._gpu_alloc_size = n
+                self._gpu_d_stats[:n].copy_to_device(stats)
                 threads = 128
-                blocks = (stats.shape[0] + threads - 1) // threads
+                blocks = (n + threads - 1) // threads
                 _gpu_prescore_kernel[blocks, threads](
-                    d_stats,
-                    d_out,
+                    self._gpu_d_stats[:n],
+                    self._gpu_d_out[:n],
                     np.float32(ad_ratio),
                     np.float32(ap_ratio),
                     np.float32(phys_frac),
@@ -1374,12 +1385,14 @@ class BuildOptimizer:
                     np.float32(weights.lifesteal),
                     np.float32(weights.utility),
                     np.float32(weights.consistency),
-                    np.float32(self.champion.base_hp),
+                    np.float32(base_hp),
                 )
-                return [float(x) for x in d_out.copy_to_host()]
+                self._active_compute_backend = "gpu"
+                return [float(x) for x in self._gpu_d_out[:n].copy_to_host()]
             except Exception:
                 self._active_compute_backend = "cpu"
 
+        # Vectorized NumPy CPU path — all operations are batch matrix ops.
         ad = stats[:, 0]
         ap = stats[:, 1]
         attack_speed = stats[:, 2]
@@ -1396,7 +1409,8 @@ class BuildOptimizer:
         bonus_true_damage = stats[:, 13]
 
         auto_physical = ad + attack_speed * 25.0
-        spell_raw = ad * ad_ratio + ap * ap_ratio + ability_haste * 0.9 + np.maximum(0.0, hp - self.champion.base_hp) * 0.05
+        bonus_hp = np.maximum(0.0, hp - base_hp)
+        spell_raw = ad * ad_ratio + ap * ap_ratio + ability_haste * 0.9 + bonus_hp * 0.05
         premit_physical = auto_physical + spell_raw * phys_frac + max_hp_damage * enemy.target_hp * 0.5
         premit_magic = spell_raw * magic_frac + max_hp_damage * enemy.target_hp * 0.5
         effective_armor = np.maximum(0.0, enemy.target_armor * (1.0 - armor_pen))
@@ -1412,17 +1426,19 @@ class BuildOptimizer:
             + hp * (1.0 + mr / 100.0) * (1.0 - enemy.physical_share)
         )
         lifesteal_metric = lifesteal + omnivamp
+        utility_factor = float(advanced_signals["utility_ratio"])
+        consistency_factor = float(advanced_signals["consistency_ratio"])
         utility = (
-            ability_haste * (0.72 + advanced_signals["utility_ratio"] * 0.25)
+            ability_haste * (0.72 + utility_factor * 0.25)
             + (armor + mr) * 0.35
-            + np.maximum(0.0, hp - self.champion.base_hp) * 0.02
+            + bonus_hp * 0.02
         )
         consistency = (
             np.minimum(1.0, (attack_speed * 18.0 + ability_haste) / 100.0) * 40.0
-            + advanced_signals["consistency_ratio"] * 30.0
+            + consistency_factor * 30.0
             + (1.0 - abs(enemy.physical_share - 0.5)) * 8.0
         )
-
+        self._active_compute_backend = "cpu"
         score = (
             weights.damage * damage
             + weights.healing * healing
@@ -1432,7 +1448,7 @@ class BuildOptimizer:
             + weights.consistency * consistency
             + damage_amp * 30.0
         )
-        return [float(x) for x in score.tolist()]
+        return score.tolist()
 
     def _batch_prescore_python(
         self,
