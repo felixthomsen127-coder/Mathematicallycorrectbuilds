@@ -125,6 +125,8 @@ class ChampionProfile:
     average_combat_seconds: float = 8.0
     ability_breakdown: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     champion_tags: Tuple[str, ...] = ()
+    # Level-18 base AD (used for spellblade proc damage calculations).
+    base_ad: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,22 @@ class ItemStats:
     # Wiki-extracted unique passive names (lowercase). Two items sharing any name
     # cannot appear in the same build (engine hard-blocks them).
     unique_passives: Tuple[str, ...] = ()
+    # Crit chance from the item (0.0–1.0).
+    crit_chance: float = 0.0
+    # Lethality (flat armor penetration that scales with champion level).
+    # At level 18: effective_flat_pen = lethality * 1.0.  Kept separate from
+    # flat_armor_pen so simulation.py can apply the correct level scaling.
+    lethality: float = 0.0
+    # Spellblade passive values.  Only one spellblade item can be active at once
+    # (UNIQUE – Spellblade), so the optimizer takes the max across all items.
+    # Trinity Force / Sheen → bonus = spellblade_base_ad_ratio * champion base AD
+    spellblade_base_ad_ratio: float = 0.0
+    # Lich Bane → bonus = spellblade_ap_ratio * total AP
+    spellblade_ap_ratio: float = 0.0
+    # Divine Sunderer → bonus = spellblade_max_hp_ratio * enemy max HP
+    spellblade_max_hp_ratio: float = 0.0
+    # Flat on-hit damage added to every auto attack (e.g. Wit's End, Kraken Slayer).
+    on_hit_damage: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -613,16 +631,39 @@ class BuildOptimizer:
         damage_amp = sum(x.damage_amp for x in items) + rune_effects["damage_amp"]
         bonus_true_damage = sum(x.bonus_true_damage for x in items) + rune_effects["bonus_true_damage"]
         heal_amp = sum(x.heal_amp for x in items) + rune_effects["heal_amp"]
-        armor_pen = sum(x.armor_pen for x in items) + rune_effects["armor_pen"]
-        magic_pen = sum(x.magic_pen for x in items) + rune_effects["magic_pen"]
+        # Cap percent penetration per Riot's game rules.
+        armor_pen = min(sum(x.armor_pen for x in items) + rune_effects["armor_pen"], 0.45)
+        magic_pen = min(sum(x.magic_pen for x in items) + rune_effects["magic_pen"], 0.40)
         flat_armor_pen = sum(x.flat_armor_pen for x in items) + rune_effects["flat_armor_pen"]
         flat_magic_pen = sum(x.flat_magic_pen for x in items) + rune_effects["flat_magic_pen"]
+        # Lethality converts to flat pen at level 18 (scaling factor = 1.0).
+        lethality = sum(x.lethality for x in items)
+        total_flat_armor_pen = flat_armor_pen + lethality
         max_hp_damage = sum(x.max_hp_damage for x in items) + rune_effects["max_hp_damage"]
+        # Crit chance capped at 100%; average crit multiplier = 1 + 0.75 * crit_chance
+        crit_chance = min(sum(x.crit_chance for x in items), 1.0)
+        on_hit_damage = sum(x.on_hit_damage for x in items)
+
+        # Spellblade: only one item's proc can be active (UNIQUE – Spellblade).
+        # Take the maximum values across all equipped items.
+        sb_base_ad = max((x.spellblade_base_ad_ratio for x in items), default=0.0)
+        sb_ap = max((x.spellblade_ap_ratio for x in items), default=0.0)
+        sb_max_hp = max((x.spellblade_max_hp_ratio for x in items), default=0.0)
 
         # Apply diminishing returns to raw stats for scoring purposes
         eff_ad, eff_ap, eff_hp, eff_armor, eff_mr = self._apply_diminishing_returns(ad, ap, hp, armor, mr)
 
-        auto_physical = eff_ad + attack_speed * 100.0 * 0.25
+        # Crit multiplier applied to auto-attack base damage.
+        crit_mult = 1.0 + 0.75 * crit_chance
+        # On-hit contribution from attack speed (autos per second * fight duration is simplified):
+        # model as "autos per rotation" ≈ attack_speed * average_combat_seconds * 0.5
+        autos_per_rotation = max(0.5, attack_speed * max(1.0, self.champion.average_combat_seconds) * 0.5)
+        auto_physical = (
+            eff_ad * crit_mult * autos_per_rotation
+            + on_hit_damage * autos_per_rotation
+            + attack_speed * 100.0 * 0.25  # attack-speed scaling bonus
+        )
+
         spell_phys, spell_magic, spell_rotation, kit_heal_factor = self._spell_bundle_damage(
             eff_ad,
             eff_ap,
@@ -632,13 +673,24 @@ class BuildOptimizer:
             eff_mr,
             ability_haste,
         )
+
+        # Spellblade proc: one proc per ability cast (1.5 s ICD limits it).
+        # Procs over the fight = min(abilities_cast, fight_duration / 1.5).
+        spell_cast_count = max(1.0, self.champion.abilities_per_rotation)
+        sb_procs = min(spell_cast_count, max(1.0, self.champion.average_combat_seconds / 1.5))
+        sb_proc_phys = (
+            sb_base_ad * self.champion.base_ad * sb_procs
+            + sb_max_hp * enemy.target_hp * sb_procs
+        )
+        sb_proc_magic = sb_ap * eff_ap * sb_procs
+
         max_hp_proc_damage = max_hp_damage * enemy.target_hp * self.champion.abilities_per_rotation
 
-        premit_physical = auto_physical + spell_phys + max_hp_proc_damage * 0.5
-        premit_magic = spell_magic + max_hp_proc_damage * 0.5
+        premit_physical = auto_physical + spell_phys + sb_proc_phys + max_hp_proc_damage * 0.5
+        premit_magic = spell_magic + sb_proc_magic + max_hp_proc_damage * 0.5
         premit_true = bonus_true_damage * self.champion.abilities_per_rotation
 
-        effective_armor = max(0.0, enemy.target_armor * (1.0 - armor_pen) - flat_armor_pen)
+        effective_armor = max(0.0, enemy.target_armor * (1.0 - armor_pen) - total_flat_armor_pen)
         effective_mr = max(0.0, enemy.target_mr * (1.0 - magic_pen) - flat_magic_pen)
         physical_after_mitigation = premit_physical * (100.0 / (100.0 + effective_armor))
         magic_after_mitigation = premit_magic * (100.0 / (100.0 + effective_mr))
@@ -772,7 +824,13 @@ class BuildOptimizer:
                 "armor_pen_total": round(armor_pen, 3),
                 "magic_pen_total": round(magic_pen, 3),
                 "flat_armor_pen_total": round(flat_armor_pen, 3),
+                "lethality_total": round(lethality, 3),
                 "flat_magic_pen_total": round(flat_magic_pen, 3),
+                "crit_chance_total": round(crit_chance, 3),
+                "spellblade_procs": round(sb_procs, 3),
+                "spellblade_proc_phys": round(sb_proc_phys, 3),
+                "spellblade_proc_magic": round(sb_proc_magic, 3),
+                "on_hit_damage_total": round(on_hit_damage, 3),
                 "enemy_target_hp": round(enemy.target_hp, 3),
                 "enemy_target_armor": round(enemy.target_armor, 3),
                 "enemy_target_mr": round(enemy.target_mr, 3),
