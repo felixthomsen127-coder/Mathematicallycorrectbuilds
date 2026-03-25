@@ -1029,6 +1029,7 @@ class WikiScalingParser:
             _has_dr, _dr_ratio = self._extract_damage_reduction(text)
             candidate["has_damage_reduction"] = _has_dr
             candidate["damage_reduction_ratio"] = _dr_ratio
+            candidate["cast_time"] = self._extract_cast_time(text)
             candidate["scaling_by_application"] = self._group_components_by_application(candidate.get("scaling_components", []))
 
             if key not in breakdown:
@@ -1080,6 +1081,7 @@ class WikiScalingParser:
                     "range_units": 0.0,
                     "has_damage_reduction": False,
                     "damage_reduction_ratio": 0.0,
+                    "cast_time": 0.0,
                 },
             )
 
@@ -1344,6 +1346,7 @@ class WikiScalingParser:
                     "range_units": self._extract_range(sections["all"]),
                     "has_damage_reduction": self._extract_damage_reduction(sections["all"])[0],
                     "damage_reduction_ratio": self._extract_damage_reduction(sections["all"])[1],
+                    "cast_time": self._extract_cast_time(sections["all"]),
                 }
             return breakdown
 
@@ -1378,6 +1381,7 @@ class WikiScalingParser:
                 "range_units": self._extract_range(text),
                 "has_damage_reduction": _has_dr,
                 "damage_reduction_ratio": _dr_ratio,
+                "cast_time": self._extract_cast_time(text),
             }
 
         for key in ("q", "w", "e", "r"):
@@ -1410,6 +1414,7 @@ class WikiScalingParser:
                     "range_units": 0.0,
                     "has_damage_reduction": False,
                     "damage_reduction_ratio": 0.0,
+                    "cast_time": 0.0,
                 },
             )
         return breakdown
@@ -1520,6 +1525,10 @@ class WikiScalingParser:
             _sec_range = float(sec_values.get("range_units") or 0.0)
             if _sec_range > float(merged[key].get("range_units") or 0.0):
                 merged[key]["range_units"] = _sec_range
+            # cast_time: take maximum (more conservative — higher means fewer auto attacks)
+            _sec_ct = float(sec_values.get("cast_time") or 0.0)
+            if _sec_ct > float(merged[key].get("cast_time") or 0.0):
+                merged[key]["cast_time"] = _sec_ct
             merged[key]["scaling_components"] = self._merge_scaling_components(
                 merged[key].get("scaling_components", []),
                 sec_values.get("scaling_components", []),
@@ -1734,6 +1743,7 @@ class WikiScalingParser:
                 "range_units": self._extract_range(_sec_text),
                 "has_damage_reduction": self._extract_damage_reduction(_sec_text)[0],
                 "damage_reduction_ratio": self._extract_damage_reduction(_sec_text)[1],
+                "cast_time": self._extract_cast_time(_sec_text),
             }
             out[norm_key]["scaling_by_application"] = self._group_components_by_application(out[norm_key].get("scaling_components", []))
         return out
@@ -2314,6 +2324,34 @@ class WikiScalingParser:
         if m:
             try:
                 return float(m.group(1))
+
+                @staticmethod
+                def _extract_cast_time(text: str) -> float:
+                    """Return the ability cast time in seconds (0.0 if absent or not parseable)."""
+                    if not text:
+                        return 0.0
+                    # Template-style: | casttime = 0.25  or  | cast_time = 0.25
+                    m = re.search(r"\|\s*cast_?time\s*=\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+                    if m:
+                        try:
+                            return max(0.0, min(2.0, float(m.group(1))))
+                        except ValueError:
+                            pass
+                    # Rendered-style: "0.25 second cast time" or "0.5s cast time"
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*s(?:econd)?\s+cast\s*time", text, re.IGNORECASE)
+                    if m:
+                        try:
+                            return max(0.0, min(2.0, float(m.group(1))))
+                        except ValueError:
+                            pass
+                    # Rendered-style: "cast time: 0.5" or "Cast time 0.25"
+                    m = re.search(r"\bcast\s*time\s*:?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+                    if m:
+                        try:
+                            return max(0.0, min(2.0, float(m.group(1))))
+                        except ValueError:
+                            pass
+                    return 0.0
             except ValueError:
                 pass
         return 0.0

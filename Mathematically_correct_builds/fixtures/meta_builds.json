@@ -1,0 +1,16 @@
+{
+  "_comment": "Curated meta builds by champion/role. Update item names here when the meta shifts. Keys use lowercase champion name + role slug.",
+  "version": "16.6",
+  "last_updated": "2026-03-25",
+  "builds": {
+    "briar/jungle": {
+      "items": [
+        ["Scorchclaw Pup", "The Collector", "Profane Hydra", "Mercury's Treads"],
+        ["Scorchclaw Pup", "Sundered Sky", "Black Cleaver", "Plated Steelcaps"]
+      ],
+      "win_rate": 0.53,
+      "pick_rate": 0.05,
+      "source_note": "U.GG Emerald+ patch 16.6"
+    }
+  }
+}

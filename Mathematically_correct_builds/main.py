@@ -34,7 +34,7 @@ from data_sources import (
     _safe_json,
     RATE_LIMITER,
 )
-from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages, _safe_float as _safe_float
+from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages, prewarm_meta_snapshot, _safe_float as _safe_float
 from optimizer import BuildConstraints, BuildOptimizer, EnemyProfile, ItemStats, ObjectiveWeights, RuneChoice, RunePage, SearchSettings
 import simulation as sim_engine
 
@@ -157,6 +157,61 @@ _sweep_state: Dict[str, Any] = {
   "last_report": None,
   "last_error": "",
 }
+_meta_snapshot_lock = Lock()
+_meta_snapshot_running: Dict[str, float] = {}
+_meta_snapshot_recent: Dict[str, Dict[str, Any]] = {}
+
+
+def _meta_snapshot_key(champion: str, role: str, tier: str, region: str, patch: str) -> str:
+  return "|".join([
+    str(champion or "").strip().lower(),
+    str(role or "").strip().lower(),
+    str(tier or "").strip().lower(),
+    str(region or "").strip().lower(),
+    str(patch or "").strip().lower(),
+  ])
+
+
+def _schedule_meta_snapshot_prewarm(champion: str, role: str, tier: str, region: str, patch: str) -> None:
+  key = _meta_snapshot_key(champion, role, tier, region, patch)
+  now = time.time()
+  with _meta_snapshot_lock:
+    if key in _meta_snapshot_running:
+      return
+    _meta_snapshot_running[key] = now
+
+  def _worker() -> None:
+    started_at = time.time()
+    try:
+      result = prewarm_meta_snapshot(
+        champion=champion,
+        role=role,
+        tier=tier,
+        region=region,
+        patch=patch,
+      )
+      with _meta_snapshot_lock:
+        _meta_snapshot_recent[key] = {
+          "key": key,
+          "started_at": started_at,
+          "finished_at": time.time(),
+          "ok": bool(result.get("ok")),
+          "result": result,
+        }
+    except Exception as exc:
+      with _meta_snapshot_lock:
+        _meta_snapshot_recent[key] = {
+          "key": key,
+          "started_at": started_at,
+          "finished_at": time.time(),
+          "ok": False,
+          "error": str(exc),
+        }
+    finally:
+      with _meta_snapshot_lock:
+        _meta_snapshot_running.pop(key, None)
+
+  Thread(target=_worker, daemon=True).start()
 
 
 def _rune_choice_from_name(name: str, tree: str, slot: str) -> RuneChoice:
@@ -819,6 +874,13 @@ def _run_optimization(
       region=meta_region,
       patch=meta_patch,
     )
+    _schedule_meta_snapshot_prewarm(
+      champion=champion,
+      role=role,
+      tier=meta_tier,
+      region=meta_region,
+      patch=meta_patch,
+    )
     optimizer_obj = BuildOptimizer(profile, items, rune_pages=live_rune_pages or None)
     weights = ObjectiveWeights(
       damage=_float(payload, "damage", 1.0),
@@ -902,6 +964,7 @@ def _run_optimization(
           optimizer_metrics=dict(top.metrics or {}),
           evaluate_meta_build_fn=_evaluate_meta_build,
           item_id_to_name=_item_id_map,
+          allow_persistent_snapshot=True,
         )
         _step("Meta comparison complete", 0.97)
       except Exception as exc:
@@ -915,52 +978,6 @@ def _run_optimization(
           "meta_builds": [],
         }
 
-    # Issue #2: if the meta build scores higher than our build, try tweaking it
-    # to find something even better, then include the tweaked result in the response.
-    tweaked_meta_build: Optional[Dict[str, Any]] = None
-    if ranked and meta_compare.get("available"):
-        try:
-            _power_builds = meta_compare.get("modes", {}).get("power_delta", [])
-            # Find the meta build where optimizer scores LOWER (score_delta_percent < 0)
-            _weaker_cases = [b for b in _power_builds if _safe_float(b.get("score_delta_percent", 0.0), 0.0) < -1.0]
-            if _weaker_cases:
-                _best_meta = _weaker_cases[0]  # Already sorted by score_delta_percent descending (most negative first)
-                _meta_item_names = _best_meta.get("items", [])
-                _meta_resolved = _resolve_item_names_to_stats(_meta_item_names, items)
-                if len(_meta_resolved) >= 3:
-                    # Evaluate the raw meta build first
-                    _meta_eval = optimizer_obj._evaluate_best_order(
-                        _meta_resolved, weights, settings.order_permutation_cap, enemy
-                    )
-                    # Run simulated annealing neighbourhood search starting from the meta build
-                    _candidate_pool = optimizer_obj._candidate_pool(settings.candidate_pool_size)
-                    _seen_sets: set = set()
-                    _seen_sets.add(frozenset(x.item_id for x in _meta_resolved))
-                    _tweak_results = optimizer_obj._simulated_annealing(
-                        [_meta_eval],
-                        _candidate_pool,
-                        weights,
-                        settings,
-                        constraints,
-                        enemy,
-                        _seen_sets,
-                        time_budget=min(8.0, settings.exhaustive_runtime_cap_seconds * 0.15),
-                    )
-                    _all_tweak = [_meta_eval] + _tweak_results
-                    _best_tweak = max(_all_tweak, key=lambda b: b.weighted_score)
-                    tweaked_meta_build = {
-                        "original_meta_score": round(_best_meta.get("meta_weighted_score", 0.0), 3),
-                        "original_meta_items": _meta_item_names,
-                        "tweaked_score": round(_best_tweak.weighted_score, 3),
-                        "tweaked_items": [x.name for x in _best_tweak.order],
-                        "improvement_percent": round(
-                            ((_best_tweak.weighted_score - _meta_eval.weighted_score) / max(1.0, abs(_meta_eval.weighted_score))) * 100.0, 2
-                        ),
-                        "tweaked_build": serialize_build(_best_tweak, patch),
-                    }
-        except Exception as _tweak_exc:
-            tweaked_meta_build = {"error": str(_tweak_exc)}
-
     _step("Serializing results", 0.97)
     response = {
       "patch": patch,
@@ -973,7 +990,6 @@ def _run_optimization(
       "pareto": [serialize_build(x, patch) for x in pareto],
       "checkpoints": {k: serialize_build(v, patch) for k, v in checkpoints.items()},
       "meta_comparison": meta_compare,
-      "tweaked_meta_build": tweaked_meta_build,
       "meta_context": {"tier": meta_tier, "region": meta_region, "role": role, "patch": meta_patch},
       "rune_pages_considered": len(live_rune_pages),
       "compute_backend": optimizer_obj.get_compute_backend(),
@@ -1406,6 +1422,25 @@ def api_champion_scaling_sweep_status() -> Any:
         )
 
 
+@app.get("/api/meta-snapshot-status")
+def api_meta_snapshot_status() -> Any:
+  with _meta_snapshot_lock:
+    running = [{"key": key, "started_at": started} for key, started in _meta_snapshot_running.items()]
+    recent = sorted(
+      list(_meta_snapshot_recent.values()),
+      key=lambda x: float(x.get("finished_at", x.get("started_at", 0.0)) or 0.0),
+      reverse=True,
+    )[:30]
+  return _json_response(
+    {
+      "running": running,
+      "running_count": len(running),
+      "recent": recent,
+      "recent_count": len(recent),
+    }
+  )
+
+
 @app.get("/api/unknown-op-sweep")
 @cache.cached(timeout=600, query_string=True)
 def api_unknown_op_sweep() -> Any:
@@ -1494,6 +1529,7 @@ def api_unknown_op_sweep() -> Any:
             optimizer_metrics=dict(best.metrics or {}),
             evaluate_meta_build_fn=_evaluate_meta_build,
             item_id_to_name=_item_id_map,
+            allow_persistent_snapshot=True,
           )
           if not comparison.get("available"):
             continue

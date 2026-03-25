@@ -214,23 +214,41 @@ def test_ai_fallback_fills_missing_signals_from_wiki_sections(monkeypatch):
     )
     monkeypatch.setattr(parser, "_extract_from_rendered_sections", lambda sections: minimal_breakdown)
 
-    class _FakeAiResponse:
-        def raise_for_status(self):
-            return None
-
-        def iter_lines(self):
-            payload = json.dumps(
-                {
-                    "q": {"ap_ratio": 80, "base_damage": [70, 110, 150], "cooldown": [8, 7, 6]},
-                    "w": {"ad_ratio": 20, "cooldown": [12, 11, 10]},
-                    "e": {"ad_ratio": 15, "cooldown": [16, 15, 14]},
-                    "r": {"ap_ratio": 60, "cooldown": [120, 100, 80]},
-                }
-            )
-            yield json.dumps({"response": payload, "done": False}).encode()
-            yield json.dumps({"response": "", "done": True}).encode()
-
-    monkeypatch.setattr("data_sources.requests.post", lambda *args, **kwargs: _FakeAiResponse())
+    monkeypatch.setattr(
+        parser,
+        "_extract_with_ai_fallback",
+        lambda champion, sections, missing: {
+            "q": {
+                "name": "Q",
+                "ad_ratio": 0.0,
+                "ap_ratio": 0.8,
+                "attack_speed_ratio": 0.0,
+                "ms_ratio": 0.0,
+                "heal_ratio": 0.0,
+                "hp_ratio": 0.0,
+                "bonus_hp_ratio": 0.0,
+                "armor_ratio": 0.0,
+                "mr_ratio": 0.0,
+                "scaling_components": [],
+                "base_damage": [70.0, 110.0, 150.0],
+                "cooldown": [8.0, 7.0, 6.0],
+                "cost": [],
+                "resource": "",
+                "raw_text": sections.get("q", ""),
+                "source": "wiki-ai-fallback",
+                "damage_type": "magic",
+                "targeting": "unknown",
+                "on_hit": False,
+                "is_channeled": False,
+                "is_conditional": False,
+                "is_stack_scaling": False,
+                "range_units": 0.0,
+                "has_damage_reduction": False,
+                "damage_reduction_ratio": 0.0,
+                "cast_time": 0.0,
+            }
+        },
+    )
 
     scaling = parser.get_scaling("Unit AI Champ", force_refresh=True, use_ai_fallback=True)
 

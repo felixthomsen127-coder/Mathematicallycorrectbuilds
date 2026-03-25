@@ -1,5 +1,20 @@
+import pytest
+from pathlib import Path
+
 import meta_build_comparison
 from meta_build_comparison import BlitzMetaClient, MetaBuildSample, OpggMetaClient, UggMetaClient, compare_optimizer_build_to_ugg
+
+
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _read_fixture(name: str) -> str:
+    return (_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _clear_meta_cache():
+    meta_build_comparison._META_BUILD_CACHE.clear()
 
 
 def test_compare_modes_include_all_and_context(monkeypatch):
@@ -75,7 +90,13 @@ def test_rune_parser_does_not_fabricate_pages_from_plain_text():
     assert pages == []
 
 
-def test_compare_requires_item_id_map():
+def test_compare_works_without_item_id_map_when_named_samples_exist(monkeypatch):
+    samples = [
+        MetaBuildSample(source="u.gg", label="named", item_names=["Void Staff", "Rabadon's Deathcap", "Sorcerer's Shoes"]),
+    ]
+
+    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", lambda self, champion, role, tier, region, patch, **kw: samples)
+
     result = compare_optimizer_build_to_ugg(
         champion="Lux",
         optimizer_item_names=["Void Staff", "Rabadon's Deathcap", "Sorcerer's Shoes"],
@@ -83,9 +104,8 @@ def test_compare_requires_item_id_map():
         item_id_to_name=None,
     )
 
-    assert result["available"] is False
-    assert "item ID mapping" in result["reason"]
-    assert result.get("warnings")
+    assert result["available"] is True
+    assert result["source"] == "u.gg"
 
 
 def test_compare_surfaces_fetch_failure_details(monkeypatch):
@@ -102,7 +122,7 @@ def test_compare_surfaces_fetch_failure_details(monkeypatch):
     )
 
     assert result["available"] is False
-    assert "timed out" in result["reason"]
+    assert "live providers" in result["reason"]
     assert any("timed out" in x for x in result.get("warnings", []))
 
 
@@ -133,51 +153,33 @@ def test_component_alignment_uses_symmetric_denominator(monkeypatch):
     assert float(first["component_alignment"]) > 0.70
 
 
-def test_blitz_fallback_is_used_when_ugg_has_no_samples(monkeypatch):
+def test_curated_fallback_is_used_when_live_has_no_samples(monkeypatch):
     def _ugg_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
         self.last_error = "u.gg parse produced no rows"
         return []
 
-    fallback_samples = [
-        MetaBuildSample(source="blitz.gg", label="blitz-a", item_names=["Sword", "Shield", "Boots"]),
-    ]
-
-    def _blitz_ok(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = ""
-        return fallback_samples
-
     monkeypatch.setattr(UggMetaClient, "fetch_top_builds", _ugg_empty)
-    monkeypatch.setattr(BlitzMetaClient, "fetch_top_builds", _blitz_ok)
 
     result = compare_optimizer_build_to_ugg(
-        champion="Aatrox",
-        optimizer_item_names=["Sword", "Shield", "Boots"],
+        champion="Briar",
+        optimizer_item_names=["The Collector", "Profane Hydra", "Mercury's Treads"],
         role="jungle",
-        item_id_to_name={"1": "Sword", "2": "Shield", "3": "Boots"},
+        patch="16.6",
+        item_id_to_name={"1": "The Collector", "2": "Profane Hydra", "3": "Mercury's Treads"},
     )
 
     assert result["available"] is True
-    assert result["source"] == "blitz.gg"
-    assert result.get("fallback_used") is True
-    assert any("fallback" in str(x).lower() for x in result.get("warnings", []))
+    assert result["source"] == "u.gg"
+    assert result.get("fallback_used") is False
+    assert any("curated" in str(x).lower() for x in result.get("warnings", []))
 
 
-def test_dual_provider_failure_uses_combined_reason(monkeypatch):
+def test_live_provider_failure_uses_combined_reason(monkeypatch):
     def _ugg_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
         self.last_error = "u.gg timeout"
         return []
 
-    def _blitz_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = "blitz timeout"
-        return []
-
-    def _opgg_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = "opgg timeout"
-        return []
-
     monkeypatch.setattr(UggMetaClient, "fetch_top_builds", _ugg_empty)
-    monkeypatch.setattr(BlitzMetaClient, "fetch_top_builds", _blitz_empty)
-    monkeypatch.setattr(OpggMetaClient, "fetch_top_builds", _opgg_empty)
 
     result = compare_optimizer_build_to_ugg(
         champion="Lux",
@@ -186,30 +188,15 @@ def test_dual_provider_failure_uses_combined_reason(monkeypatch):
     )
 
     assert result["available"] is False
-    assert "U.GG, Blitz.gg, or OP.GG" in result["reason"]
-    assert "No U.GG build data could be parsed at this time." not in result["reason"]
+    assert "live providers" in result["reason"]
 
 
-def test_opgg_fallback_is_used_when_ugg_and_blitz_fail(monkeypatch):
-    def _ugg_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = "u.gg parse produced no rows"
-        return []
-
-    def _blitz_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = "blitz parse produced no rows"
-        return []
-
-    opgg_samples = [
-        MetaBuildSample(source="op.gg", label="opgg-a", item_names=["Sword", "Shield", "Boots"]),
+def test_no_fallback_flag_when_live_source_available(monkeypatch):
+    live_samples = [
+        MetaBuildSample(source="lolalytics", label="live-a", item_names=["Sword", "Shield", "Boots"]),
     ]
 
-    def _opgg_ok(self, champion, role, tier, region, patch, item_id_to_name=None):
-        self.last_error = ""
-        return opgg_samples
-
-    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", _ugg_empty)
-    monkeypatch.setattr(BlitzMetaClient, "fetch_top_builds", _blitz_empty)
-    monkeypatch.setattr(OpggMetaClient, "fetch_top_builds", _opgg_ok)
+    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", lambda self, champion, role, tier, region, patch, **kw: live_samples)
 
     result = compare_optimizer_build_to_ugg(
         champion="Aatrox",
@@ -219,18 +206,12 @@ def test_opgg_fallback_is_used_when_ugg_and_blitz_fail(monkeypatch):
     )
 
     assert result["available"] is True
-    assert result["source"] == "op.gg"
-    assert result.get("fallback_used") is True
+    assert result["source"] == "lolalytics"
+    assert result.get("fallback_used") is False
 
 
-def test_ocr_fallback_rows_are_used_when_other_extractors_fail(monkeypatch):
+def test_parse_builds_returns_empty_when_no_structured_payloads(monkeypatch):
     monkeypatch.setattr(meta_build_comparison, "_extract_json_script_payloads", lambda _html: [])
-    monkeypatch.setattr(meta_build_comparison, "_extract_item_names_from_visual_text", lambda _html, _map: [])
-    monkeypatch.setattr(
-        meta_build_comparison,
-        "_extract_item_names_from_ocr",
-        lambda _html, _map: [["Sword", "Shield", "Boots", "Dagger"]],
-    )
 
     client = UggMetaClient()
     rows = client._parse_builds_from_html(
@@ -238,5 +219,101 @@ def test_ocr_fallback_rows_are_used_when_other_extractors_fail(monkeypatch):
         item_id_to_name={"1": "Sword", "2": "Shield", "3": "Boots", "4": "Dagger"},
     )
 
+    assert rows == []
+
+
+def test_parse_builds_can_extract_named_arrays_without_id_map(monkeypatch):
+    payload = {
+        "build": {
+            "items": ["Void Staff", "Rabadon's Deathcap", "Sorcerer's Shoes", "Shadowflame"],
+        }
+    }
+    monkeypatch.setattr(meta_build_comparison, "_extract_json_script_payloads", lambda _html: [payload])
+
+    client = UggMetaClient()
+    rows = client._parse_builds_from_html("<html></html>", item_id_to_name=None)
+
     assert rows
-    assert rows[0].label == "ocr-fallback"
+    assert rows[0].label == "structured-json"
+    assert "Void Staff" in rows[0].item_names
+
+
+def test_cache_fallback_is_used_when_all_providers_fail(monkeypatch):
+    meta_build_comparison._META_BUILD_CACHE.clear()
+
+    primed = [
+        MetaBuildSample(source="u.gg", label="prime", item_names=["Sword", "Shield", "Boots"]),
+    ]
+
+    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", lambda self, champion, role, tier, region, patch, **kw: primed)
+    first = compare_optimizer_build_to_ugg(
+        champion="Aatrox",
+        optimizer_item_names=["Sword", "Shield", "Boots"],
+        role="jungle",
+        item_id_to_name={"1": "Sword", "2": "Shield", "3": "Boots"},
+    )
+    assert first["available"] is True
+    assert first.get("cache_used") is False
+
+    def _fail_ugg(self, champion, role, tier, region, patch, item_id_to_name=None):
+        self.last_error = "u.gg timeout"
+        return []
+
+    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", _fail_ugg)
+
+    cached = compare_optimizer_build_to_ugg(
+        champion="Aatrox",
+        optimizer_item_names=["Sword", "Shield", "Boots"],
+        role="jungle",
+        item_id_to_name={"1": "Sword", "2": "Shield", "3": "Boots"},
+    )
+
+    assert cached["available"] is True
+    assert cached.get("cache_used") is True
+    assert cached.get("live_fetch_failed") is True
+    assert any("cached" in str(x).lower() for x in cached.get("warnings", []))
+
+
+def test_curated_briar_baseline_used_when_live_fetch_fails(monkeypatch):
+    def _ugg_empty(self, champion, role, tier, region, patch, item_id_to_name=None):
+        self.last_error = "u.gg timeout"
+        return []
+
+    monkeypatch.setattr(UggMetaClient, "fetch_top_builds", _ugg_empty)
+
+    result = compare_optimizer_build_to_ugg(
+        champion="Briar",
+        optimizer_item_names=["The Collector", "Profane Hydra", "Mercury's Treads"],
+        role="jungle",
+        patch="16.6",
+        item_id_to_name={"1": "The Collector", "2": "Profane Hydra", "3": "Mercury's Treads"},
+    )
+
+    assert result["available"] is True
+    assert result["source"] == "u.gg"
+    assert result.get("fallback_used") is False
+    assert result["meta_builds"]
+    first_items = result["meta_builds"][0]["items"]
+    assert "The Collector" in first_items
+
+
+def test_blitz_parser_extracts_window_nuxt_keyed_build_fixture():
+    html = _read_fixture("blitz_window_nuxt.html")
+    client = BlitzMetaClient()
+    rows = client._parse_builds_from_html(html, item_id_to_name=None)
+
+    assert rows
+    assert rows[0].source == "blitz.gg"
+    assert rows[0].label in {"blitz-keyed-json", "structured-json"}
+    assert "Kraken Slayer" in rows[0].item_names
+
+
+def test_opgg_parser_extracts_keyed_build_fixture():
+    html = _read_fixture("opgg_keyed_builds.html")
+    client = OpggMetaClient()
+    rows = client._parse_builds_from_html(html, item_id_to_name=None)
+
+    assert rows
+    assert rows[0].source == "op.gg"
+    assert rows[0].label in {"opgg-keyed-json", "structured-json"}
+    assert "Luden's Companion" in rows[0].item_names

@@ -342,6 +342,7 @@ class BuildOptimizer:
         for item in self.items:
             if item.total_gold <= 0:
                 continue
+            item_bias = self._item_tag_multiplier(item)
             base_value = (
                 item.ad * (ad_w / 0.333)          # scale relative to neutral weight
                 + item.ap * (ap_w / 0.333)
@@ -359,10 +360,89 @@ class BuildOptimizer:
                 + item.magic_pen * 90.0 * (ap_w / 0.333) * pen_magic_mult
                 + item.flat_magic_pen * 1.2 * pen_magic_mult
             )
+            base_value *= item_bias
             scored.append((base_value / item.total_gold, item))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [item for _, item in scored[: max(2, pool_size)]]
+
+    @staticmethod
+    def _norm_token(value: str) -> str:
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    def _champion_tag_item_preferences(self) -> Dict[str, float]:
+        prefs: Dict[str, float] = {}
+
+        def _boost(tag: str, value: float) -> None:
+            key = self._norm_token(tag)
+            if not key:
+                return
+            prefs[key] = prefs.get(key, 0.0) + value
+
+        champion_tags = {self._norm_token(x) for x in self.champion.champion_tags}
+
+        if "marksman" in champion_tags:
+            _boost("criticalstrike", 0.18)
+            _boost("attackspeed", 0.14)
+            _boost("damage", 0.10)
+        if "assassin" in champion_tags:
+            _boost("armorpenetration", 0.20)
+            _boost("lethality", 0.20)
+            _boost("damage", 0.10)
+            _boost("criticalstrike", 0.08)
+        if "fighter" in champion_tags:
+            _boost("damage", 0.10)
+            _boost("health", 0.08)
+            _boost("abilityhaste", 0.08)
+            _boost("lifesteal", 0.10)
+        if "tank" in champion_tags:
+            _boost("health", 0.16)
+            _boost("armor", 0.12)
+            _boost("spellblock", 0.12)
+        if "mage" in champion_tags:
+            _boost("spelldamage", 0.20)
+            _boost("magicpenetration", 0.14)
+            _boost("mana", 0.08)
+            _boost("abilityhaste", 0.08)
+        if "support" in champion_tags:
+            _boost("manaregen", 0.10)
+            _boost("abilityhaste", 0.10)
+            _boost("health", 0.06)
+
+        return prefs
+
+    def _item_tag_multiplier(self, item: ItemStats) -> float:
+        if self._is_boots(item):
+            return 1.0
+
+        prefs = self._champion_tag_item_preferences()
+        item_tags = {self._norm_token(x) for x in item.tags}
+        champion_tags = {self._norm_token(x) for x in self.champion.champion_tags}
+        mult = 1.0
+        for key, value in prefs.items():
+            if key in item_tags:
+                mult += value
+
+        # Guard against off-class AP spikes for AD bruisers/assassins.
+        ad_class = bool(champion_tags.intersection({"fighter", "assassin", "marksman"}))
+        if ad_class and "mage" not in champion_tags and item.ap >= 60 and item.ad < 25:
+            mult -= 0.22
+        if ad_class and item.ad >= 45:
+            mult += 0.06
+
+        # Item tags can be sparse; add stat/name-based fallback for Briar specifically.
+        if self._norm_token(self.champion.champion_name) == "briar":
+            lowered_name = item.name.lower()
+            if item.ap > max(30.0, item.ad * 0.4):
+                mult -= 0.55
+            if "nashor" in lowered_name or "lich bane" in lowered_name:
+                mult -= 0.30
+            if item.flat_armor_pen > 0 or item.armor_pen > 0:
+                mult += 0.10
+            if item.lifesteal > 0 or item.omnivamp > 0:
+                mult += 0.10
+
+        return max(0.25, min(1.35, mult))
 
     def _heuristic_build(
         self,
@@ -618,6 +698,8 @@ class BuildOptimizer:
         flat_armor_pen = sum(x.flat_armor_pen for x in items) + rune_effects["flat_armor_pen"]
         flat_magic_pen = sum(x.flat_magic_pen for x in items) + rune_effects["flat_magic_pen"]
         max_hp_damage = sum(x.max_hp_damage for x in items) + rune_effects["max_hp_damage"]
+        item_proc_profile = self._item_proc_archetypes(items)
+        combat_profile = self._combat_pattern_profile(items, attack_speed, ability_haste)
 
         # Apply diminishing returns to raw stats for scoring purposes
         eff_ad, eff_ap, eff_hp, eff_armor, eff_mr = self._apply_diminishing_returns(ad, ap, hp, armor, mr)
@@ -632,11 +714,21 @@ class BuildOptimizer:
             eff_mr,
             ability_haste,
         )
-        max_hp_proc_damage = max_hp_damage * enemy.target_hp * self.champion.abilities_per_rotation
+        realized_damage_amp = damage_amp * (
+            0.72
+            + 0.16 * combat_profile["stack_uptime"]
+            + 0.12 * combat_profile["aoe_ratio"]
+            + item_proc_profile["amp_realization_bonus"]
+        )
+        realized_bonus_true_damage = bonus_true_damage * combat_profile["proc_frequency"] * item_proc_profile["true_damage_realization"]
+        max_hp_proc_damage = max_hp_damage * enemy.target_hp * (
+            combat_profile["auto_attacks"] * (0.18 + 0.40 * combat_profile["on_hit_ratio"])
+            + combat_profile["spell_casts"] * (0.06 + 0.18 * combat_profile["aoe_ratio"])
+        ) * item_proc_profile["max_hp_proc_multiplier"]
 
         premit_physical = auto_physical + spell_phys + max_hp_proc_damage * 0.5
         premit_magic = spell_magic + max_hp_proc_damage * 0.5
-        premit_true = bonus_true_damage * self.champion.abilities_per_rotation
+        premit_true = realized_bonus_true_damage
 
         effective_armor = max(0.0, enemy.target_armor * (1.0 - armor_pen) - flat_armor_pen)
         effective_mr = max(0.0, enemy.target_mr * (1.0 - magic_pen) - flat_magic_pen)
@@ -655,11 +747,20 @@ class BuildOptimizer:
             pen_bonus += flat_magic_pen * 0.06
 
         base_damage = physical_after_mitigation + magic_after_mitigation + premit_true + pen_bonus
-        damage = base_damage * (1.0 + damage_amp)
+        damage = base_damage * (1.0 + realized_damage_amp)
 
         self_heal_from_kit = kit_heal_factor
-        sustain_from_damage = damage * (lifesteal * 0.22 + omnivamp * 0.28)
-        healing = (self_heal_from_kit + sustain_from_damage) * (1.0 + heal_amp)
+        physical_factor = 100.0 / (100.0 + effective_armor)
+        auto_damage_after_mitigation = auto_physical * physical_factor
+        spell_damage_after_mitigation = max(0.0, damage - auto_damage_after_mitigation)
+        healing = self._effective_healing(
+            auto_damage_after_mitigation=auto_damage_after_mitigation,
+            spell_damage_after_mitigation=spell_damage_after_mitigation,
+            lifesteal=lifesteal,
+            omnivamp=omnivamp,
+            heal_amp=heal_amp,
+            kit_heal=self_heal_from_kit,
+        )
 
         ehp_vs_physical = eff_hp * (1.0 + eff_armor / 100.0)
         ehp_vs_magic = eff_hp * (1.0 + eff_mr / 100.0)
@@ -669,8 +770,19 @@ class BuildOptimizer:
         dr_factor = 1.0 + min(0.60, self_dr)  # cap contribution at +60% effective HP
         tankiness = (ehp_vs_physical * enemy.physical_share + ehp_vs_magic * (1.0 - enemy.physical_share)) * dr_factor
 
-        lifesteal_metric = lifesteal + omnivamp
-        interaction_bonus, interactions = self._interaction_bonus(items, ad, ap, lifesteal_metric, armor_pen, magic_pen)
+        lifesteal_metric = self._effective_sustain_metric(lifesteal, omnivamp, auto_damage_after_mitigation, spell_damage_after_mitigation)
+        interaction_bonus, interactions = self._interaction_bonus(
+            items,
+            ad,
+            ap,
+            lifesteal_metric,
+            armor_pen,
+            magic_pen,
+            attack_speed,
+            ability_haste,
+            combat_profile["stack_uptime"],
+            combat_profile["proc_frequency"],
+        )
         advanced_signals = self._advanced_ability_signals()
         gold_eff_bonus = self._gold_efficiency_bonus(items)
 
@@ -739,6 +851,8 @@ class BuildOptimizer:
             "interaction_bonus": round(interaction_bonus, 3),
             "gold_efficiency_bonus": round(gold_eff_bonus, 3),
             "self_damage_reduction": round(self_dr, 4),
+            "stack_uptime": round(combat_profile["stack_uptime"], 4),
+            "proc_frequency": round(combat_profile["proc_frequency"], 4),
         }
 
         contributions = {
@@ -769,10 +883,18 @@ class BuildOptimizer:
                 "mr_total": round(mr, 3),
                 "ability_haste_total": round(ability_haste, 3),
                 "damage_amp_total": round(damage_amp, 3),
+                "realized_damage_amp_total": round(realized_damage_amp, 3),
                 "armor_pen_total": round(armor_pen, 3),
                 "magic_pen_total": round(magic_pen, 3),
                 "flat_armor_pen_total": round(flat_armor_pen, 3),
                 "flat_magic_pen_total": round(flat_magic_pen, 3),
+                "max_hp_proc_damage_total": round(max_hp_proc_damage, 3),
+                "realized_bonus_true_damage": round(realized_bonus_true_damage, 3),
+                "hit_events": round(combat_profile["hit_events"], 3),
+                "auto_attacks_est": round(combat_profile["auto_attacks"], 3),
+                "spell_casts_est": round(combat_profile["spell_casts"], 3),
+                "item_proc_bias": round(item_proc_profile["proc_bias"], 3),
+                "item_stack_bias": round(item_proc_profile["stack_bias"], 3),
                 "enemy_target_hp": round(enemy.target_hp, 3),
                 "enemy_target_armor": round(enemy.target_armor, 3),
                 "enemy_target_mr": round(enemy.target_mr, 3),
@@ -1137,19 +1259,52 @@ class BuildOptimizer:
         armor: float,
         mr: float,
     ) -> tuple[float, float, float, float, float]:
-        """Apply soft diminishing returns to raw stats above natural thresholds."""
-        ad_excess = max(0.0, ad - 200.0) / 200.0
-        ap_excess = max(0.0, ap - 300.0) / 300.0
-        hp_excess = max(0.0, hp - 3000.0) / 3000.0
-        armor_excess = max(0.0, armor - 150.0) / 150.0
-        mr_excess = max(0.0, mr - 100.0) / 100.0
-
-        eff_ad = ad * (1.0 - 0.035 * ad_excess)
-        eff_ap = ap * (1.0 - 0.035 * ap_excess)
-        eff_hp = hp * (1.0 - 0.035 * hp_excess)
-        eff_armor = armor * (1.0 - 0.035 * armor_excess)
-        eff_mr = mr * (1.0 - 0.035 * mr_excess)
+        """Apply symmetric soft-caps: mild under-threshold penalty, stronger over-cap decay."""
+        eff_ad = self._symm_soft_cap(ad, 200.0, low_decay=0.010, high_decay=0.040)
+        eff_ap = self._symm_soft_cap(ap, 300.0, low_decay=0.008, high_decay=0.040)
+        eff_hp = self._symm_soft_cap(hp, 3000.0, low_decay=0.004, high_decay=0.040)
+        eff_armor = self._symm_soft_cap(armor, 150.0, low_decay=0.006, high_decay=0.040)
+        eff_mr = self._symm_soft_cap(mr, 100.0, low_decay=0.006, high_decay=0.040)
         return eff_ad, eff_ap, eff_hp, eff_armor, eff_mr
+
+    @staticmethod
+    def _symm_soft_cap(value: float, threshold: float, low_decay: float, high_decay: float) -> float:
+        if value <= 0:
+            return 0.0
+        if threshold <= 0:
+            return value
+        if value <= threshold:
+            deficit = (threshold - value) / threshold
+            return value * max(0.85, 1.0 - low_decay * deficit)
+        excess = (value - threshold) / threshold
+        decay = high_decay * (excess / (1.0 + excess))
+        return value * max(0.60, 1.0 - decay)
+
+    @staticmethod
+    def _effective_sustain_metric(
+        lifesteal: float,
+        omnivamp: float,
+        auto_damage_after_mitigation: float,
+        spell_damage_after_mitigation: float,
+    ) -> float:
+        total = max(1.0, auto_damage_after_mitigation + spell_damage_after_mitigation)
+        spell_share = spell_damage_after_mitigation / total
+        auto_share = 1.0 - spell_share
+        return max(0.0, lifesteal * (0.55 + 0.45 * auto_share) + omnivamp * (0.25 + 0.45 * spell_share))
+
+    def _effective_healing(
+        self,
+        auto_damage_after_mitigation: float,
+        spell_damage_after_mitigation: float,
+        lifesteal: float,
+        omnivamp: float,
+        heal_amp: float,
+        kit_heal: float,
+    ) -> float:
+        auto_heal = auto_damage_after_mitigation * max(0.0, lifesteal) * 0.85
+        # Omnivamp is less effective on AoE-style spell damage in this model.
+        spell_heal = spell_damage_after_mitigation * max(0.0, omnivamp) * 0.60
+        return (kit_heal + auto_heal + spell_heal) * (1.0 + heal_amp)
 
     def _gold_efficiency_bonus(self, items: Sequence[ItemStats]) -> float:
         """Reward items that provide above-average stat value per gold spent.
@@ -1173,6 +1328,142 @@ class BuildOptimizer:
                 total += efficiency * 5.0
         return min(50.0, total)
 
+    def _item_proc_archetypes(self, items: Sequence[ItemStats]) -> Dict[str, float]:
+        names = {str(x.name or "").lower() for x in items}
+        profile = {
+            "proc_bias": 0.0,
+            "stack_bias": 0.0,
+            "amp_realization_bonus": 0.0,
+            "true_damage_realization": 1.0,
+            "max_hp_proc_multiplier": 1.0,
+        }
+
+        if any("kraken" in n for n in names):
+            profile["proc_bias"] += 0.28
+            profile["true_damage_realization"] += 0.18
+        if any("nashor" in n for n in names):
+            profile["proc_bias"] += 0.20
+            profile["max_hp_proc_multiplier"] += 0.06
+        if any("statikk" in n for n in names):
+            profile["proc_bias"] += 0.22
+            profile["true_damage_realization"] += 0.06
+        if any("blade of the ruined king" in n or "bork" in n for n in names):
+            profile["proc_bias"] += 0.22
+            profile["max_hp_proc_multiplier"] += 0.22
+        if any("titanic hydra" in n for n in names):
+            profile["proc_bias"] += 0.18
+            profile["max_hp_proc_multiplier"] += 0.18
+        if any("ravenous hydra" in n for n in names):
+            profile["proc_bias"] += 0.14
+            profile["true_damage_realization"] += 0.04
+        if any("guinsoo" in n for n in names):
+            profile["proc_bias"] += 0.18
+            profile["stack_bias"] += 0.12
+        if any("terminus" in n for n in names):
+            profile["proc_bias"] += 0.12
+            profile["stack_bias"] += 0.18
+        if any("liandry" in n or "blackfire" in n for n in names):
+            profile["stack_bias"] += 0.24
+            profile["amp_realization_bonus"] += 0.08
+            profile["max_hp_proc_multiplier"] += 0.08
+        if any("riftmaker" in n for n in names):
+            profile["stack_bias"] += 0.22
+            profile["amp_realization_bonus"] += 0.10
+        if any("malignance" in n for n in names):
+            profile["proc_bias"] += 0.10
+            profile["amp_realization_bonus"] += 0.05
+        if any("stormsurge" in n for n in names):
+            profile["proc_bias"] += 0.16
+            profile["true_damage_realization"] += 0.10
+        if any("eclipse" in n or "sundered sky" in n for n in names):
+            profile["proc_bias"] += 0.14
+            profile["true_damage_realization"] += 0.08
+        if any("trinity" in n or "lich bane" in n for n in names):
+            profile["proc_bias"] += 0.12
+        if any("spear of shojin" in n or "shojin" in n for n in names):
+            profile["stack_bias"] += 0.10
+            profile["amp_realization_bonus"] += 0.04
+
+        profile["proc_bias"] = min(0.70, profile["proc_bias"])
+        profile["stack_bias"] = min(0.60, profile["stack_bias"])
+        profile["amp_realization_bonus"] = min(0.16, profile["amp_realization_bonus"])
+        profile["true_damage_realization"] = min(1.55, profile["true_damage_realization"])
+        profile["max_hp_proc_multiplier"] = min(1.55, profile["max_hp_proc_multiplier"])
+        return profile
+
+    def _total_rotation_cast_time(self, ability_haste: float) -> float:
+        """Return the total seconds spent animating spell casts in one combat window.
+
+        Each ability's cast_time is multiplied by the estimated number of casts it
+        contributes in a single rotation, capped at 65% of the combat window so the
+        value stays physically plausible even for ability-spam champions.
+        """
+        breakdown = self.champion.ability_breakdown or {}
+        window = max(2.5, float(self.champion.average_combat_seconds or 0.0))
+        total = 0.0
+        for key, block in breakdown.items():
+            if not isinstance(block, dict) or key == "passive":
+                continue
+            cast_time = float(block.get("cast_time", 0.0) or 0.0)
+            if cast_time <= 0.0:
+                continue
+            casts = self._estimate_spell_casts(key, block, ability_haste)
+            total += cast_time * casts
+        return min(total, window * 0.65)
+
+    def _combat_pattern_profile(self, items: Sequence[ItemStats], attack_speed: float, ability_haste: float) -> Dict[str, float]:
+        breakdown = self.champion.ability_breakdown or {}
+        item_profile = self._item_proc_archetypes(items)
+        window = max(2.5, float(self.champion.average_combat_seconds or 0.0))
+        total_abilities = 0
+        on_hit_hits = 0
+        aoe_hits = 0
+        channel_hits = 0
+        spell_casts = 0.0
+
+        for key, block in breakdown.items():
+            if not isinstance(block, dict):
+                continue
+            total_abilities += 1
+            if bool(block.get("on_hit")):
+                on_hit_hits += 1
+            targeting = str(block.get("targeting", "") or "").lower()
+            if any(token in targeting for token in ("aoe", "cone", "line", "multi", "area", "radius")):
+                aoe_hits += 1
+            if bool(block.get("is_channeled")):
+                channel_hits += 1
+            if key != "passive":
+                spell_casts += self._estimate_spell_casts(key, block, ability_haste)
+
+        total_abilities = max(1, total_abilities)
+        on_hit_ratio = on_hit_hits / total_abilities
+        aoe_ratio = aoe_hits / total_abilities
+        channel_ratio = channel_hits / total_abilities
+        on_hit_ratio = min(1.0, on_hit_ratio + item_profile["proc_bias"] * 0.18)
+
+        auto_attacks = window * max(0.55, 0.85 + attack_speed * 0.9)
+        total_cast_time = self._total_rotation_cast_time(ability_haste)
+        auto_window = max(0.5, window - total_cast_time)
+        auto_attacks = auto_window * max(0.55, 0.85 + attack_speed * 0.9)
+        hit_events = auto_attacks * (0.9 + 0.4 * on_hit_ratio) + spell_casts * (0.85 + 0.25 * aoe_ratio)
+        hit_rate = max(0.25, hit_events / window)
+        stack_target = max(2.0, 4.0 + 3.0 * (1.0 - on_hit_ratio) + 1.5 * channel_ratio - item_profile["stack_bias"] * 2.5)
+        ramp_time = stack_target / hit_rate
+        stack_uptime = max(0.0, min(1.0, (window - ramp_time) / window))
+
+        proc_interval = max(2.0, 8.0 - min(4.0, ability_haste / 25.0) - 1.5 * on_hit_ratio - item_profile["proc_bias"] * 2.2)
+        proc_frequency = 1.0 + max(0.0, window - 1.0) / proc_interval
+
+        return {
+            "auto_attacks": auto_attacks,
+            "spell_casts": spell_casts,
+            "hit_events": hit_events,
+            "stack_uptime": stack_uptime,
+            "proc_frequency": proc_frequency,
+            "on_hit_ratio": on_hit_ratio,
+            "aoe_ratio": aoe_ratio,
+        }
+
     def _interaction_bonus(
         self,
         items: Sequence[ItemStats],
@@ -1181,10 +1472,15 @@ class BuildOptimizer:
         lifesteal_metric: float,
         armor_pen: float,
         magic_pen: float,
+        attack_speed: float,
+        ability_haste: float,
+        stack_uptime: float,
+        proc_frequency: float,
     ) -> Tuple[float, List[str]]:
         names = {x.name.lower() for x in items}
         bonus = 0.0
         interactions: List[str] = []
+        profile = self._advanced_ability_signals()
 
         spike_ad, spike_ap = self._effective_spike_ratios()
         if ad >= 200 and armor_pen > 0 and spike_ad > 0.1:
@@ -1209,7 +1505,6 @@ class BuildOptimizer:
             interactions.append(f"On-hit shred loop (+{pair_bonus:.2f})")
 
         # --- Enhanced synergies ---
-        attack_speed = sum(x.attack_speed for x in items)
         if any("kraken" in n for n in names) and attack_speed > 0.5:
             pair_bonus = 18.0
             bonus += pair_bonus
@@ -1230,6 +1525,28 @@ class BuildOptimizer:
             pair_bonus = 12.0
             bonus += pair_bonus
             interactions.append(f"Sundered Sky crit heal (+{pair_bonus:.2f})")
+
+        # Champion-kit-aware interaction boosts.
+        if profile["aoe_ratio"] >= 0.45 and any("liandry" in n or "blackfire" in n for n in names):
+            pair_bonus = 8.0 + 10.0 * profile["aoe_ratio"]
+            bonus += pair_bonus
+            interactions.append(f"AoE burn amplifier (+{pair_bonus:.2f})")
+        if profile["utility_ratio"] >= 0.40 and ability_haste >= 30.0:
+            pair_bonus = 6.0 + 0.08 * min(120.0, ability_haste)
+            bonus += pair_bonus
+            interactions.append(f"Utility haste loop (+{pair_bonus:.2f})")
+        if profile["consistency_ratio"] >= 0.60 and lifesteal_metric > 0.12:
+            pair_bonus = 9.0 + 20.0 * min(0.35, lifesteal_metric)
+            bonus += pair_bonus
+            interactions.append(f"Sustain consistency loop (+{pair_bonus:.2f})")
+        if stack_uptime >= 0.45:
+            pair_bonus = 4.0 + 10.0 * stack_uptime
+            bonus += pair_bonus
+            interactions.append(f"Ramp uptime pressure (+{pair_bonus:.2f})")
+        if proc_frequency >= 2.0:
+            pair_bonus = 3.0 + 2.5 * min(4.0, proc_frequency)
+            bonus += pair_bonus
+            interactions.append(f"Proc cadence pressure (+{pair_bonus:.2f})")
 
         return bonus, interactions
 

@@ -161,6 +161,67 @@
     <p id="error" class="err"></p>
   </div>
 
+  <div class="card guide-card">
+    <h3 style="margin-top:0;"><i data-lucide="sparkles"></i> Why Use This Optimizer</h3>
+    <div class="guide-pill-row">
+      <span class="guide-pill">Algorithmic item optimization</span>
+      <span class="guide-pill">Enemy profile aware scoring</span>
+      <span class="guide-pill">Rune-aware build context</span>
+      <span class="guide-pill">Patch-tracked data sources</span>
+      <span class="guide-pill">Meta comparison with rationale</span>
+    </div>
+    <div class="guide-steps">
+      <div class="guide-step">
+        <span class="guide-step-num">1</span>
+        <div><b>Choose champion + role</b><p class="muted">Start with your intended lane/jungle context.</p></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-step-num">2</span>
+        <div><b>Set objective weights</b><p class="muted">Tune damage, sustain, tankiness, utility, and consistency.</p></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-step-num">3</span>
+        <div><b>Model target profile</b><p class="muted">Enemy HP, armor, MR, and incoming physical share drive build value.</p></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-step-num">4</span>
+        <div><b>Read the build story</b><p class="muted">Interpret why rank #1 wins and how it differs from meta lines.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card quick-controls-card">
+    <h3 style="margin-top:0;"><i data-lucide="sliders-horizontal"></i> Quick Presets</h3>
+    <div class="quick-block">
+      <div class="quick-label">Role quick select</div>
+      <div class="quick-chip-row" id="roleQuickRow">
+        <button type="button" class="quick-chip secondary" data-role="top" onclick="applyRoleQuick('top', this)">Top</button>
+        <button type="button" class="quick-chip secondary" data-role="jungle" onclick="applyRoleQuick('jungle', this)">Jungle</button>
+        <button type="button" class="quick-chip secondary" data-role="middle" onclick="applyRoleQuick('middle', this)">Middle</button>
+        <button type="button" class="quick-chip secondary" data-role="adc" onclick="applyRoleQuick('adc', this)">ADC</button>
+        <button type="button" class="quick-chip secondary" data-role="support" onclick="applyRoleQuick('support', this)">Support</button>
+      </div>
+    </div>
+    <div class="quick-block">
+      <div class="quick-label">Build style presets</div>
+      <div class="quick-chip-row" id="buildPresetRow">
+        <button type="button" class="quick-chip" data-preset="burst_assassin" onclick="applyBuildPreset('burst_assassin', this)">Burst Assassin</button>
+        <button type="button" class="quick-chip" data-preset="frontline_bruiser" onclick="applyBuildPreset('frontline_bruiser', this)">Frontline Bruiser</button>
+        <button type="button" class="quick-chip" data-preset="extended_fight_dps" onclick="applyBuildPreset('extended_fight_dps', this)">Extended Fight DPS</button>
+      </div>
+    </div>
+    <div class="quick-block" style="margin-top:0.65rem;">
+      <div class="quick-label">Enemy scenario templates</div>
+      <div class="quick-chip-row" id="enemyScenarioRow">
+        <button type="button" class="quick-chip secondary" data-scenario="squishy_backline" onclick="applyEnemyScenario('squishy_backline', this)">Squishy Backline</button>
+        <button type="button" class="quick-chip secondary" data-scenario="balanced_teamfight" onclick="applyEnemyScenario('balanced_teamfight', this)">Balanced Teamfight</button>
+        <button type="button" class="quick-chip secondary" data-scenario="double_frontline" onclick="applyEnemyScenario('double_frontline', this)">Double Frontline</button>
+        <button type="button" class="quick-chip secondary" data-scenario="heavy_ad" onclick="applyEnemyScenario('heavy_ad', this)">Heavy AD</button>
+        <button type="button" class="quick-chip secondary" data-scenario="heavy_ap" onclick="applyEnemyScenario('heavy_ap', this)">Heavy AP</button>
+      </div>
+    </div>
+  </div>
+
   <!-- AI Suggest card -->
   <div class="card">
     <h3 style="margin-top:0;"><i data-lucide="bot"></i> AI Build Suggester <span class="muted" style="font-size:0.8rem;">(requires Ollama running locally)</span></h3>
@@ -221,7 +282,13 @@
   <div class="card result">
     <h3>Top Weighted Results</h3>
     <div class="chart-panel"><canvas id="scoreChart" height="120"></canvas></div>
+    <div id="rankedInsights" class="muted" style="margin-bottom:0.7rem;">No run yet.</div>
     <div id="ranked" class="muted">No run yet.</div>
+  </div>
+
+  <div class="card result">
+    <h3>Build Story</h3>
+    <div id="buildStory" class="muted">Run an optimization to generate a concise explanation.</div>
   </div>
 
   <div class="card result">
