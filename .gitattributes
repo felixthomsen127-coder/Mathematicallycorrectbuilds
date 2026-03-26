@@ -1,0 +1,36 @@
+# Normalize text files by default.
+* text=auto
+
+# Source and project files use LF in-repo.
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.env text eol=lf
+*.txt text eol=lf
+*.Dockerfile text eol=lf
+Dockerfile text eol=lf
+
+# Keep Windows scripts as CRLF for native shell compatibility.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never modify binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.sqlite binary
+*.pyc binary
