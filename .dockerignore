@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+test_*.py
+*_test.py
+tests/
+
+# Documentation
+*.md
+docs/
+
+# Azure
+.azure/
+.env
+.env.local
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Cache
+.cache/
+*.cache
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+mathematically_correct_builds/http_cache/
+fixtures/

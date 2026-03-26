@@ -13,6 +13,13 @@ let runtimeCapabilities = null;
 const iconPrefetchSeen = new Set();
 let splashThemeController = null;
 let splashThemeRequestId = 0;
+let lastMetaComparison = null;
+let lastBuildWarning = '';
+let prefetchStatusTimer = 0;
+const BUILD_PRESET_STORAGE_KEY = 'mcb.buildPreset';
+const ENEMY_SCENARIO_STORAGE_KEY = 'mcb.enemyScenario';
+const CHAMPION_STORAGE_KEY = 'mcb.selectedChampion';
+const ROLE_STORAGE_KEY = 'mcb.selectedRole';
 
 // Champion picker
 async function loadChampions() {
@@ -71,6 +78,92 @@ function renderRuntimeNotice() {
   notice.textContent = ocr.available
     ? `OCR fallback ready: ${String(ocr.reason || 'available')}`
     : `OCR fallback inactive: ${String(ocr.reason || 'not available')}`;
+}
+
+function renderPrefetchStatus(data) {
+  const pctEl = document.getElementById('prefetchPct');
+  const fillEl = document.getElementById('prefetchFill');
+  const metaEl = document.getElementById('prefetchMeta');
+  if (!pctEl || !fillEl || !metaEl) return;
+
+  const criticalPct = Number(data && data.critical_progress_percent || 0);
+  const overallPct = Number(data && data.progress_percent || 0);
+  const running = Boolean(data && data.running);
+  const currentLabel = String(data && data.current_label || '').trim();
+  const criticalCompleted = Number(data && data.critical_completed || 0);
+  const criticalTotal = Number(data && data.critical_total || 0);
+  const failed = Number(data && data.failed || 0);
+
+  pctEl.textContent = `${Math.round(criticalPct)}%`;
+  fillEl.style.width = `${Math.max(0, Math.min(100, criticalPct))}%`;
+
+  if (!running && overallPct >= 100) {
+    metaEl.textContent = 'Critical data ready for this patch.';
+    return;
+  }
+
+  const head = criticalTotal > 0
+    ? `${criticalCompleted}/${criticalTotal} critical tasks ready`
+    : 'Preparing patch cache';
+  const tail = currentLabel || (running ? 'Background fetch running...' : 'Waiting to start...');
+  const failText = failed > 0 ? ` | ${failed} failed` : '';
+  metaEl.textContent = `${head}${failText} | ${tail}`;
+}
+
+async function pollPrefetchStatus() {
+  try {
+    const res = await fetch('/api/prefetch-status');
+    const data = await res.json();
+    if (!res.ok) return;
+    renderPrefetchStatus(data || {});
+  } catch (_) {
+    // Ignore background status failures; the page remains usable.
+  } finally {
+    window.clearTimeout(prefetchStatusTimer);
+    prefetchStatusTimer = window.setTimeout(pollPrefetchStatus, 2500);
+  }
+}
+
+async function prioritizeChampionPrefetch(championName) {
+  if (!championName) return;
+  try {
+    await fetch('/api/prefetch-priority', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        champion: championName,
+        role: document.getElementById('role') ? document.getElementById('role').value : 'jungle',
+        tier: document.getElementById('meta_tier') ? document.getElementById('meta_tier').value : 'emerald_plus',
+        region: document.getElementById('meta_region') ? document.getElementById('meta_region').value : 'global',
+        patch: document.getElementById('meta_patch') ? document.getElementById('meta_patch').value : 'live',
+      }),
+    });
+  } catch (_) {
+    // Background prioritization is best-effort only.
+  }
+}
+
+function switchResultTab(tabName) {
+  // Hide all panels
+  const panels = document.querySelectorAll('.tab-panel');
+  panels.forEach(p => p.classList.remove('active'));
+  
+  // Deactivate all buttons
+  const buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach(b => b.classList.remove('active'));
+  
+  // Show selected panel
+  const panel = document.getElementById(`tab-${tabName}`);
+  if (panel) panel.classList.add('active');
+  
+  // Activate selected button
+  const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+  if (btn) btn.classList.add('active');
+  
+  // If tab contains a chart, trigger resize (for Chart.js responsiveness)
+  if (window.scoreChart && scoreChart.resize) {
+    setTimeout(() => scoreChart.resize(), 100);
+  }
 }
 
 function prefetchIcon(url) {
@@ -346,15 +439,28 @@ async function applyChampionVisualTheme(champ) {
   }
   splashThemeController = new AbortController();
 
+  const banner = document.getElementById('champSplashBanner');
+
   if (!splashUrl) {
     root.style.setProperty('--champion-splash-url', 'none');
     applyChampionPaletteVars(null);
     document.body.classList.remove('splash-ready');
+    if (banner) { banner.style.display = 'none'; banner.classList.remove('visible'); }
     return;
   }
 
   root.style.setProperty('--champion-splash-url', `url("${splashUrl.replace(/\"/g, '\\\"')}")`);
   document.body.classList.remove('splash-ready');
+
+  // Show splash banner
+  if (banner) {
+    banner.style.display = 'block';
+    const escapedUrl = splashUrl.replace(/\\/g, '\\\\').replace(/\"/g, '\\"');
+    banner.style.backgroundImage = `url("${escapedUrl}")`;
+    banner.classList.remove('visible');
+    // Trigger fade-in on next frame
+    requestAnimationFrame(() => { requestAnimationFrame(() => { banner.classList.add('visible'); }); });
+  }
 
   try {
     const palette = await extractSplashPalette(splashUrl, splashThemeController.signal, champ);
@@ -422,6 +528,8 @@ document.getElementById('champList').addEventListener('click', (e) => {
 
 async function selectChamp(champ) {
   selectedChampion = champ.name;
+  saveQuickSelection(CHAMPION_STORAGE_KEY, selectedChampion);
+  void prioritizeChampionPrefetch(champ.name);
   void applyChampionVisualTheme(champ);
   document.getElementById('champSelName').textContent = champ.name;
   const icon = document.getElementById('champSelIcon');
@@ -509,6 +617,213 @@ function onModeChange() {
 }
 onModeChange();
 
+function setActiveQuickChip(rowId, activeBtn) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  row.querySelectorAll('.quick-chip').forEach((el) => el.classList.remove('active'));
+  if (activeBtn) activeBtn.classList.add('active');
+}
+
+function syncRoleQuickChips() {
+  const roleEl = document.getElementById('role');
+  if (!roleEl) return;
+  const role = String(roleEl.value || '').trim();
+  const btn = document.querySelector(`#roleQuickRow .quick-chip[data-role="${role}"]`);
+  setActiveQuickChip('roleQuickRow', btn);
+}
+
+function applyRoleQuick(roleValue, sourceBtn = null) {
+  const roleEl = document.getElementById('role');
+  if (!roleEl) return;
+  roleEl.value = roleValue;
+  saveQuickSelection(ROLE_STORAGE_KEY, roleEl.value);
+  setActiveQuickChip('roleQuickRow', sourceBtn);
+  const status = document.getElementById('status');
+  if (status) status.textContent = `Role set to ${roleValue}`;
+}
+
+function saveQuickSelection(storageKey, value) {
+  try {
+    window.localStorage.setItem(storageKey, String(value || ''));
+  } catch (_) {
+    // Ignore storage failures (private mode, disabled storage, quota).
+  }
+}
+
+function loadQuickSelection(storageKey) {
+  try {
+    return String(window.localStorage.getItem(storageKey) || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function restoreQuickSelections() {
+  const savedPreset = loadQuickSelection(BUILD_PRESET_STORAGE_KEY);
+  if (savedPreset) {
+    const presetBtn = document.querySelector(`#buildPresetRow .quick-chip[data-preset="${savedPreset}"]`);
+    if (presetBtn) {
+      applyBuildPreset(savedPreset, presetBtn);
+    }
+  }
+
+  const savedScenario = loadQuickSelection(ENEMY_SCENARIO_STORAGE_KEY);
+  if (savedScenario) {
+    const scenarioBtn = document.querySelector(`#enemyScenarioRow .quick-chip[data-scenario="${savedScenario}"]`);
+    if (scenarioBtn) {
+      applyEnemyScenario(savedScenario, scenarioBtn);
+    }
+  }
+}
+
+function restorePrimarySelections() {
+  const savedChampion = loadQuickSelection(CHAMPION_STORAGE_KEY);
+  if (savedChampion) {
+    selectedChampion = savedChampion;
+  }
+
+  const roleEl = document.getElementById('role');
+  if (!roleEl) return;
+
+  const savedRole = loadQuickSelection(ROLE_STORAGE_KEY);
+  if (savedRole) {
+    roleEl.value = savedRole;
+  }
+
+  roleEl.addEventListener('change', () => {
+    saveQuickSelection(ROLE_STORAGE_KEY, roleEl.value);
+    syncRoleQuickChips();
+  });
+
+  syncRoleQuickChips();
+}
+
+function applyBuildPreset(presetKey, sourceBtn = null) {
+  const presets = {
+    burst_assassin: {
+      damage: 1.2,
+      healing: 0.0,
+      tank: 0.0,
+      ls: 0.0,
+      utility: 0.35,
+      consistency: 0.05,
+      mode: 'near_exhaustive',
+      pool: 18,
+      beam: 65,
+      deep_search: 'true',
+    },
+    frontline_bruiser: {
+      damage: 0.9,
+      healing: 0.35,
+      tank: 0.65,
+      ls: 0.2,
+      utility: 0.3,
+      consistency: 0.25,
+      mode: 'near_exhaustive',
+      pool: 20,
+      beam: 75,
+      deep_search: 'true',
+    },
+    extended_fight_dps: {
+      damage: 1.0,
+      healing: 0.15,
+      tank: 0.2,
+      ls: 0.35,
+      utility: 0.25,
+      consistency: 0.45,
+      mode: 'near_exhaustive',
+      pool: 22,
+      beam: 85,
+      deep_search: 'true',
+    },
+  };
+
+  const preset = presets[presetKey];
+  if (!preset) return;
+
+  document.getElementById('damage').value = String(preset.damage);
+  document.getElementById('healing').value = String(preset.healing);
+  document.getElementById('tank').value = String(preset.tank);
+  document.getElementById('ls').value = String(preset.ls);
+  document.getElementById('utility').value = String(preset.utility);
+  document.getElementById('consistency').value = String(preset.consistency);
+  document.getElementById('mode').value = preset.mode;
+  document.getElementById('pool').value = String(preset.pool);
+  document.getElementById('beam').value = String(preset.beam);
+  document.getElementById('deep_search').value = preset.deep_search;
+  onModeChange();
+
+  setActiveQuickChip('buildPresetRow', sourceBtn);
+  saveQuickSelection(BUILD_PRESET_STORAGE_KEY, presetKey);
+  const status = document.getElementById('status');
+  if (status) status.textContent = `Applied preset: ${presetKey.replaceAll('_', ' ')}`;
+}
+
+function applyEnemyScenario(scenarioKey, sourceBtn = null) {
+  const scenarios = {
+    squishy_backline: {hp: 2300, armor: 70, mr: 55, physicalShare: 0.45},
+    balanced_teamfight: {hp: 3200, armor: 120, mr: 95, physicalShare: 0.5},
+    double_frontline: {hp: 4600, armor: 210, mr: 165, physicalShare: 0.55},
+    heavy_ad: {hp: 3300, armor: 145, mr: 85, physicalShare: 0.72},
+    heavy_ap: {hp: 3300, armor: 95, mr: 135, physicalShare: 0.28},
+  };
+
+  const scenario = scenarios[scenarioKey];
+  if (!scenario) return;
+
+  document.getElementById('enemy_hp').value = String(scenario.hp);
+  document.getElementById('enemy_armor').value = String(scenario.armor);
+  document.getElementById('enemy_mr').value = String(scenario.mr);
+  document.getElementById('enemy_physical_share').value = String(scenario.physicalShare);
+
+  const simHp = document.getElementById('simHp');
+  const simArmor = document.getElementById('simArmor');
+  const simMr = document.getElementById('simMr');
+  if (simHp) {
+    simHp.value = String(Math.min(6000, Math.max(500, scenario.hp)));
+    document.getElementById('simHpVal').textContent = simHp.value;
+  }
+  if (simArmor) {
+    simArmor.value = String(Math.min(300, Math.max(0, scenario.armor)));
+    document.getElementById('simArmorVal').textContent = simArmor.value;
+  }
+  if (simMr) {
+    simMr.value = String(Math.min(200, Math.max(0, scenario.mr)));
+    document.getElementById('simMrVal').textContent = simMr.value;
+  }
+
+  setActiveQuickChip('enemyScenarioRow', sourceBtn);
+  saveQuickSelection(ENEMY_SCENARIO_STORAGE_KEY, scenarioKey);
+  const status = document.getElementById('status');
+  if (status) status.textContent = `Applied enemy scenario: ${scenarioKey.replaceAll('_', ' ')}`;
+}
+
+function buildConfidence(row, rankIndex) {
+  const metrics = row && row.metrics ? row.metrics : {};
+  const trace = row && row.trace ? row.trace : {};
+  let score = 55;
+
+  score += Math.min(15, Number(metrics.consistency || 0) * 0.24);
+  score += Math.min(10, Number(metrics.proc_frequency || 0) * 4.5);
+  score += Math.min(10, Number(metrics.stack_uptime || 0) * 16);
+  if (Number(trace.hit_events || 0) > 0 && Number(trace.spell_casts_est || 0) > 0) score += 8;
+  if (Number(metrics.damage || 0) > 0 && Number(metrics.tankiness || 0) > 0) score += 5;
+  if (rankIndex < 3) score += 2;
+
+  if (lastMetaComparison && lastMetaComparison.available) {
+    score += 6;
+    if (Array.isArray(lastMetaComparison.warnings) && lastMetaComparison.warnings.length) score -= 4;
+  } else {
+    score -= 5;
+  }
+  if (lastBuildWarning) score -= 6;
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  if (score >= 78) return {label: `High confidence ${score}`, cls: 'conf-high'};
+  if (score >= 60) return {label: `Medium confidence ${score}`, cls: 'conf-medium'};
+  return {label: `Low confidence ${score}`, cls: 'conf-low'};
+}
+
 // Ollama model picker
 async function loadOllamaModels() {
   try {
@@ -594,6 +909,8 @@ async function runOptimize() {
 
     currentPatch = data.patch || currentPatch;
     lastRanked = data.ranked || [];
+    lastMetaComparison = data.meta_comparison || null;
+    lastBuildWarning = String(data.build_warning || '');
 
     if (data.steps && data.steps.length) {
       const lis = data.steps.map(s => `<li>${escHtml(s.label)} <span style="color:var(--muted);font-size:0.78rem;">(${s.ms}ms)</span></li>`).join('');
@@ -611,11 +928,13 @@ async function runOptimize() {
     const warningHtml = data.build_warning
       ? `<div class="build-warning">Warning: ${escHtml(data.build_warning)}</div>`
       : '';
+    renderRankedInsights(data.ranked || []);
     document.getElementById('ranked').innerHTML = warningHtml + formatRows(data.ranked, 'ranked');
     document.getElementById('pareto').innerHTML = formatRows(data.pareto, 'pareto');
     document.getElementById('checkpoints').innerHTML = formatCheckpoints(data.checkpoints, data.patch);
     document.getElementById('metaComparison').innerHTML = formatMetaComparison(data.meta_comparison || {});
     renderScoreChart(data.ranked || []);
+    renderBuildStory(data || {});
     if (window.lucide) { window.lucide.createIcons(); }
   } catch (err) {
     if (!document.getElementById('error').textContent) {
@@ -696,6 +1015,102 @@ function renderScoreChart(ranked) {
       },
     },
   });
+}
+
+function buildArchetype(metrics) {
+  const m = metrics || {};
+  const burst = Number(m.burst_profile || 0);
+  const sustain = Number(m.sustained_profile || 0);
+  const tank = Number(m.tankiness || 0);
+  const dmg = Number(m.damage || 0);
+  const utility = Number(m.utility || 0);
+
+  if (burst >= sustain * 1.18 && burst >= 25) return 'Burst-first spike build';
+  if (sustain >= burst * 1.12 && sustain >= 20) return 'Sustained DPS build';
+  if (tank >= dmg * 0.95 && tank >= 30) return 'Durable bruiser line';
+  if (utility >= 18) return 'Utility-skewed control build';
+  return 'Balanced all-rounder build';
+}
+
+function formatDelta(v) {
+  const n = Number(v || 0);
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
+}
+
+function renderBuildStory(result) {
+  const panel = document.getElementById('buildStory');
+  if (!panel) return;
+
+  const ranked = Array.isArray(result && result.ranked) ? result.ranked : [];
+  if (!ranked.length) {
+    panel.innerHTML = '<p class="muted">Run an optimization to generate a concise explanation.</p>';
+    return;
+  }
+
+  const top = ranked[0] || {};
+  const second = ranked[1] || null;
+  const topMetrics = top.metrics || {};
+  const topContrib = top.contributions || {};
+  const lead = second ? (Number(top.weighted_score || 0) - Number(second.weighted_score || 0)) : 0;
+  const topNames = Array.isArray(top.order) ? top.order.map((x) => String((x && x.name) || '').trim()).filter(Boolean) : [];
+  const archetype = buildArchetype(topMetrics);
+
+  const factors = [
+    `Damage ${Number(topMetrics.damage || 0).toFixed(1)} with weighted contribution ${Number(topContrib.damage_component || 0).toFixed(2)}`,
+    `Tankiness ${Number(topMetrics.tankiness || 0).toFixed(1)} and utility ${Number(topMetrics.utility || 0).toFixed(1)} keep the score stable`,
+    `Proc cadence ${Number(topMetrics.proc_frequency || 0).toFixed(2)} and stack uptime ${Number(topMetrics.stack_uptime || 0).toFixed(2)} support reliable fights`,
+  ];
+
+  const adjustments = [];
+  if (Number(topMetrics.proc_frequency || 0) < 1.5) {
+    adjustments.push('If this feels low-tempo in game, increase utility weight slightly and expand candidate pool for more haste or proc options.');
+  } else {
+    adjustments.push('Current profile already has healthy proc cadence; avoid over-indexing haste unless your matchup demands faster rotations.');
+  }
+  if (Number(topMetrics.tankiness || 0) < Number(topMetrics.damage || 0) * 0.4) {
+    adjustments.push('Into heavy dive teams, raise tankiness weight by about +0.2 to test safer variants.');
+  } else {
+    adjustments.push('Durability is acceptable for mixed threats; keep enemy physical share accurate to preserve this ranking.');
+  }
+
+  const meta = result.meta_comparison || {};
+  const bestMatch = meta && meta.best_match ? meta.best_match : null;
+  const metaBits = [];
+  if (meta && meta.available && bestMatch) {
+    metaBits.push(`Best meta overlap: ${Number(bestMatch.similarity || 0).toFixed(3)}`);
+    metaBits.push(`Power delta vs best meta: ${formatDelta(bestMatch.score_delta_percent)}%`);
+  } else {
+    metaBits.push('Meta comparison unavailable for this context; story is based on optimizer signals only.');
+  }
+
+  const chips = [
+    `Archetype: ${archetype}`,
+    second ? `Lead vs #2: ${formatDelta(lead)}` : 'Single candidate result',
+    topNames.length ? `Core: ${topNames.slice(0, 3).join(' + ')}` : 'No item list available',
+  ];
+
+  panel.innerHTML = `
+    <div class="story-box">
+      <div class="story-head">${chips.map((c) => `<span class="story-chip">${escHtml(c)}</span>`).join('')}</div>
+      <p class="story-lede">
+        Rank #1 wins because it combines <b>${escHtml(archetype.toLowerCase())}</b> with a strong weighted profile for this enemy setup.
+      </p>
+      <div class="story-grid">
+        <div class="story-col">
+          <h4>Why It Wins</h4>
+          <ul class="story-list">${factors.map((f) => `<li>${escHtml(f)}</li>`).join('')}</ul>
+        </div>
+        <div class="story-col">
+          <h4>Compared To Meta</h4>
+          <ul class="story-list">${metaBits.map((f) => `<li>${escHtml(f)}</li>`).join('')}</ul>
+        </div>
+        <div class="story-col">
+          <h4>What To Try Next</h4>
+          <ul class="story-list">${adjustments.map((f) => `<li>${escHtml(f)}</li>`).join('')}</ul>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function formatMetaComparison(meta) {
@@ -866,6 +1281,12 @@ function showLoadingPanel(show) {
   const panel = document.getElementById('loadingPanel');
   if (!panel) return;
   panel.style.display = show ? 'block' : 'none';
+  if (show) {
+    // Reset step log when a new run starts
+    const stepLog = document.getElementById('loadStepLog');
+    if (stepLog) stepLog.innerHTML = '';
+    _lastLoadPhase = '';
+  }
 }
 
 function formatEta(seconds) {
@@ -878,6 +1299,8 @@ function formatEta(seconds) {
   return `ETA ${Math.round(seconds)}s`;
 }
 
+let _lastLoadPhase = '';
+
 function setLoadState(data) {
   const running = data.status === 'running';
   let pct = Number(data.progress_percent || 0);
@@ -889,8 +1312,18 @@ function setLoadState(data) {
   const phase = document.getElementById('loadPhase');
   const eta = document.getElementById('loadEta');
   const pctEl = document.getElementById('loadPct');
+  const stepLog = document.getElementById('loadStepLog');
   if (fill) fill.style.width = `${pct}%`;
-  if (phase) phase.textContent = data.phase || 'Running optimization...';
+
+  const phaseText = data.phase || 'Running optimization...';
+  if (phase) {
+    if (running) {
+      phase.textContent = phaseText;
+    } else {
+      phase.textContent = phaseText;
+    }
+  }
+
   if (eta) {
     if (data.status === 'complete') {
       const elapsed = Number(data.elapsed_seconds || 0);
@@ -902,6 +1335,24 @@ function setLoadState(data) {
     }
   }
   if (pctEl) pctEl.textContent = `${pct}% complete`;
+
+  // Append new phase step to the step log
+  if (stepLog && phaseText && phaseText !== _lastLoadPhase) {
+    _lastLoadPhase = phaseText;
+    // Mark all existing items as non-current
+    stepLog.querySelectorAll('.load-step-item.current').forEach(el => el.classList.remove('current'));
+    const item = document.createElement('div');
+    item.className = 'load-step-item current';
+    item.textContent = `› ${phaseText}`;
+    stepLog.appendChild(item);
+    // Keep only last 6 steps
+    const items = stepLog.querySelectorAll('.load-step-item');
+    if (items.length > 6) {
+      for (let i = 0; i < items.length - 6; i++) {
+        stepLog.removeChild(items[i]);
+      }
+    }
+  }
 }
 
 async function waitForOptimizeResult(jobId) {
@@ -1177,8 +1628,12 @@ function runePageHtml(runePage) {
     const options = Array.isArray(row) ? row : [];
     const chips = options.map((opt) => {
       const optName = String((opt && opt.name) || 'Shard');
+      const iconUrl = String((opt && opt.icon_url) || '').trim();
       const selected = selectedShards.has(normalizeRuneToken(optName));
-      return `<span class="rune-shard${selected ? ' rune-shard-selected' : ''}" title="${escHtml(optName)}">${escHtml(runeGlyph(optName))}</span>`;
+      const iconHtml = iconUrl
+        ? `<img class="shard-icon" src="${escHtml(iconUrl)}" alt="${escHtml(optName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" /><span class="shard-glyph" style="display:none">${escHtml(runeGlyph(optName))}</span>`
+        : `<span class="shard-glyph">${escHtml(runeGlyph(optName))}</span>`;
+      return `<span class="rune-shard${selected ? ' rune-shard-selected' : ''}" title="${escHtml(optName)}">${iconHtml}</span>`;
     }).join('');
     return `<div class="rune-shard-row">${chips}</div>`;
   }).join('');
@@ -1196,27 +1651,181 @@ function runePageHtml(runePage) {
   </div>`;
 }
 
+function formatTraceValue(value, digits = 2) {
+  if (value === null || value === undefined || value === '') return 'n/a';
+  const num = Number(value);
+  if (Number.isFinite(num)) return num.toFixed(digits);
+  return escHtml(String(value));
+}
+
+function formatSignedValue(value, digits = 2) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return 'n/a';
+  return `${num >= 0 ? '+' : ''}${num.toFixed(digits)}`;
+}
+
+function buildTraceSummary(row) {
+  const metrics = row.metrics || {};
+  const contributions = row.contributions || {};
+  const trace = row.trace || {};
+  const interactions = Array.isArray(row.interactions) ? row.interactions : [];
+  const labels = {
+    damage_component: 'damage pressure',
+    healing_component: 'healing conversion',
+    tankiness_component: 'durability',
+    lifesteal_component: 'sustain loop',
+    utility_component: 'utility profile',
+    consistency_component: 'reliability',
+    order_component: 'item timing',
+    interaction_component: 'item synergy',
+    gold_efficiency_component: 'gold efficiency',
+  };
+
+  const rankedContribs = Object.entries(labels)
+    .map(([key, label]) => ({key, label, value: Number(contributions[key] || 0)}))
+    .filter((entry) => entry.value > 0.01)
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 3);
+
+  const summaryBits = rankedContribs.map((entry) => `${entry.label} ${formatSignedValue(entry.value, 2)}`);
+
+  if (Number(trace.realized_damage_amp_total || 0) > 0.03) {
+    summaryBits.push(`realized amp ${formatSignedValue(trace.realized_damage_amp_total, 3)}`);
+  } else if (Number(trace.max_hp_proc_damage_total || 0) > 40) {
+    summaryBits.push(`max-HP proc ${formatTraceValue(trace.max_hp_proc_damage_total, 1)}`);
+  }
+
+  if (Number(metrics.stack_uptime || 0) >= 0.55) {
+    summaryBits.push(`strong ramp uptime ${formatTraceValue(metrics.stack_uptime, 2)}`);
+  } else if (Number(metrics.proc_frequency || 0) >= 1.1) {
+    summaryBits.push(`high proc cadence ${formatTraceValue(metrics.proc_frequency, 2)}`);
+  }
+
+  if (Number(metrics.burst_profile || 0) > Number(metrics.sustained_profile || 0) * 1.15) {
+    summaryBits.push(`burst-leaning profile ${formatTraceValue(metrics.burst_profile, 1)}`);
+  } else if (Number(metrics.sustained_profile || 0) > Number(metrics.burst_profile || 0) * 1.15) {
+    summaryBits.push(`sustained edge ${formatTraceValue(metrics.sustained_profile, 1)}`);
+  }
+
+  if (interactions.length) {
+    summaryBits.push(interactions[0]);
+  }
+
+  const uniqueBits = [];
+  const seen = new Set();
+  summaryBits.forEach((bit) => {
+    const key = String(bit || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    uniqueBits.push(bit);
+  });
+
+  return uniqueBits.slice(0, 5);
+}
+
+function renderTraceDrawer(row, cardId) {
+  const trace = row && row.trace ? row.trace : {};
+  if (!trace || typeof trace !== 'object' || Object.keys(trace).length === 0) return '';
+
+  const metricHint = (label, helpText) => `<span>${escHtml(label)} <span class="metric-help" title="${escHtml(helpText)}">?</span></span>`;
+  const metricCell = (label, value, helpText, digits = 2) => `<div class="trace-metric">
+      <div class="trace-metric-label">${metricHint(label, helpText)}</div>
+      <div class="trace-metric-value">${formatTraceValue(value, digits)}</div>
+    </div>`;
+
+  const sections = [
+    {
+      title: 'Proc Realization',
+      metrics: [
+        metricCell('realized amp', trace.realized_damage_amp_total, 'The amount of damage amplification the optimizer expects this build to actually cash in during the fight window.', 3),
+        metricCell('raw amp', trace.damage_amp_total, 'The raw amplification available on paper before uptime and cadence reduce it.', 3),
+        metricCell('max HP proc dmg', trace.max_hp_proc_damage_total, 'Estimated maximum-health-based proc damage converted during the fight.', 3),
+        metricCell('bonus true dmg', trace.realized_bonus_true_damage, 'Estimated bonus true damage successfully realized from proc-oriented effects.', 3),
+      ],
+    },
+    {
+      title: 'Combat Pattern',
+      metrics: [
+        metricCell('hit events', trace.hit_events, 'Estimated meaningful contact events, combining autos and spell hits, over the modeled fight.', 3),
+        metricCell('auto attacks', trace.auto_attacks_est, 'Estimated number of auto attacks in the modeled fight window.', 3),
+        metricCell('spell casts', trace.spell_casts_est, 'Estimated number of spell casts contributing to damage pressure.', 3),
+        metricCell('proc bias', trace.item_proc_bias, 'Item-derived tendency toward extra proc windows or repeat triggers.', 3),
+        metricCell('stack bias', trace.item_stack_bias, 'Item-derived tendency toward ramping and sustaining stacked passives.', 3),
+      ],
+    },
+    {
+      title: 'Stat Totals',
+      metrics: [
+        metricCell('AD', trace.ad_total, 'Final attack damage total used by the evaluator.', 1),
+        metricCell('AP', trace.ap_total, 'Final ability power total used by the evaluator.', 1),
+        metricCell('AS', trace.attack_speed_total, 'Final attack speed contribution used in proc and DPS realization.', 3),
+        metricCell('AH', trace.ability_haste_total, 'Final ability haste total used to estimate spell cadence.', 1),
+        metricCell('armor pen', trace.armor_pen_total, 'Percent armor penetration applied in the damage model.', 3),
+        metricCell('magic pen', trace.magic_pen_total, 'Percent magic penetration applied in the damage model.', 3),
+      ],
+    },
+    {
+      title: 'Enemy Context',
+      metrics: [
+        metricCell('target HP', trace.enemy_target_hp, 'Enemy HP assumed by the optimizer for this run.', 1),
+        metricCell('target armor', trace.enemy_target_armor, 'Enemy armor assumed by the optimizer for this run.', 1),
+        metricCell('target MR', trace.enemy_target_mr, 'Enemy magic resist assumed by the optimizer for this run.', 1),
+        metricCell('rotation raw', trace.spell_rotation_raw, 'Raw spell-rotation value before weighting and interaction bonuses.', 3),
+        metricCell('rune amp', trace.rune_damage_amp, 'Additional damage amplification coming from the selected rune page.', 4),
+      ],
+    },
+  ];
+
+  const summaryBits = buildTraceSummary(row);
+  const summaryHtml = summaryBits.length
+    ? `<div class="trace-summary-box">
+        <div class="trace-summary-title">Why this build won</div>
+        <div class="trace-chip-row">${summaryBits.map((bit) => `<span class="trace-chip">${escHtml(bit)}</span>`).join('')}</div>
+      </div>`
+    : '';
+
+  const sectionsHtml = sections.map((section) => `<div class="trace-section">
+      <div class="trace-section-title">${escHtml(section.title)}</div>
+      <div class="trace-grid">${section.metrics.join('')}</div>
+    </div>`).join('');
+
+  return `<details class="trace-drawer" id="trace_${cardId}">
+    <summary class="trace-summary">Trace details</summary>
+    <div class="trace-body">${summaryHtml}${sectionsHtml}</div>
+  </details>`;
+}
+
 function formatRows(rows, id) {
   if (!rows || rows.length === 0) return '<p class="muted">No results.</p>';
 
   const patch = currentPatch;
+  const metricHint = (label, helpText) => `<span>${escHtml(label)} <span class="metric-help" title="${escHtml(helpText)}">?</span></span>`;
   const renderCard = (row, idx) => {
     const m = row.metrics;
     const c = row.contributions || {};
     const interactions = row.interactions && row.interactions.length > 0 ? row.interactions.join('; ') : 'none';
     const runeHtml = runePageHtml(row.rune_page || {});
+    const stackUptime = Number(m.stack_uptime || 0).toFixed(2);
+    const procFrequency = Number(m.proc_frequency || 0).toFixed(2);
+    const confidence = buildConfidence(row, idx);
+    const traceHtml = renderTraceDrawer(row, `${id}_${idx}`);
     return `<div class="build-card${idx < 3 ? ' top-rank' : ''}">
-      <h4>#${idx+1} <code style="font-size:0.9rem;">${row.weighted_score}</code></h4>
+      <div class="build-card-head">
+        <h4>#${idx+1} <code style="font-size:0.9rem;">${row.weighted_score}</code></h4>
+        <span class="build-confidence ${confidence.cls}">${escHtml(confidence.label)}</span>
+      </div>
       <div class="build-items">${itemIconsHtml(row.order, patch)}</div>
       ${runeHtml}
       <div class="build-metrics">
         dmg <b>${m.damage}</b> | heal <b>${m.healing}</b> | tank <b>${m.tankiness}</b> | ls <b>${m.lifesteal}</b> | util <b>${m.utility || 0}</b> | consist <b>${m.consistency || 0}</b>
       </div>
+      <div class="build-metrics build-metric-help-row" style="margin-top:2px;">${metricHint('proc cadence', 'Estimated number of meaningful passive or burst proc windows the build can trigger in a typical fight. Higher means more frequent proc conversion.')} <b>${procFrequency}</b> | ${metricHint('stack uptime', 'Estimated fraction of the fight spent at or near fully ramped passive strength. Higher means better long-fight realization.')} <b>${stackUptime}</b></div>
       <div class="build-metrics" style="margin-top:2px;">
         explain: dmg ${c.damage_component||0} | heal ${c.healing_component||0} | tank ${c.tankiness_component||0} | ls ${c.lifesteal_component||0} | util ${c.utility_component||0} | consist ${c.consistency_component||0} | order ${c.order_component||0} | synergy ${c.interaction_component||0}
       </div>
       <div class="build-metrics" style="margin-top:2px;">profiles: burst ${m.burst_profile||0} | sustained ${m.sustained_profile||0} | aoe ${m.aoe_pressure||0}</div>
       <div class="build-metrics" style="margin-top:2px;">interactions: ${escHtml(interactions)}</div>
+      ${traceHtml}
     </div>`;
   };
 
@@ -1232,6 +1841,52 @@ function formatRows(rows, id) {
      <button class="show-more-btn" id="${btnId}" onclick="toggleMore('${moreId}','${btnId}',${rest.length})">
        Show ${rest.length} more...
      </button>`;
+}
+
+function renderRankedInsights(rows) {
+  const panel = document.getElementById('rankedInsights');
+  if (!panel) return;
+  if (!rows || rows.length < 2) {
+    panel.innerHTML = '<p class="muted">Run an optimization to compare top builds on proc cadence, stack uptime, and fight profile.</p>';
+    return;
+  }
+
+  const top = rows.slice(0, 3);
+  const first = top[0];
+  const second = top[1];
+  const third = top[2] || null;
+  const lead = Number(first.weighted_score || 0) - Number(second.weighted_score || 0);
+  const topProc = top.reduce((best, row) => Number(row.metrics?.proc_frequency || 0) > Number(best.metrics?.proc_frequency || 0) ? row : best, top[0]);
+  const topStack = top.reduce((best, row) => Number(row.metrics?.stack_uptime || 0) > Number(best.metrics?.stack_uptime || 0) ? row : best, top[0]);
+  const topBurst = top.reduce((best, row) => Number(row.metrics?.burst_profile || 0) > Number(best.metrics?.burst_profile || 0) ? row : best, top[0]);
+
+  const summaryBits = [
+    `Top build leads #2 by <b>${lead.toFixed(2)}</b> weighted score.`,
+    `Best proc cadence: <b>#${top.indexOf(topProc) + 1}</b> at <b>${Number(topProc.metrics?.proc_frequency || 0).toFixed(2)}</b>.`,
+    `Best stack uptime: <b>#${top.indexOf(topStack) + 1}</b> at <b>${Number(topStack.metrics?.stack_uptime || 0).toFixed(2)}</b>.`,
+    `Best burst profile: <b>#${top.indexOf(topBurst) + 1}</b> at <b>${Number(topBurst.metrics?.burst_profile || 0).toFixed(1)}</b>.`,
+  ];
+
+  const compareRows = [first, second, third].filter(Boolean).map((row, idx) => {
+    const m = row.metrics || {};
+    return `<div class="insight-row">
+      <div class="insight-rank">#${idx + 1}</div>
+      <div class="insight-main">
+        <div class="insight-score">score ${Number(row.weighted_score || 0).toFixed(2)}</div>
+        <div class="insight-stats">
+          <span class="insight-pill">proc ${Number(m.proc_frequency || 0).toFixed(2)}</span>
+          <span class="insight-pill">stack ${Number(m.stack_uptime || 0).toFixed(2)}</span>
+          <span class="insight-pill">burst ${Number(m.burst_profile || 0).toFixed(1)}</span>
+          <span class="insight-pill">sustain ${Number(m.sustained_profile || 0).toFixed(1)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="insight-summary">${summaryBits.join(' ')}</div>
+    <div class="insight-grid">${compareRows}</div>
+  `;
 }
 
 function toggleMore(divId, btnId, count) {
@@ -1426,10 +2081,13 @@ function renderSimResults(data, container) {
 }
 
 // Boot
+restorePrimarySelections();
 loadChampions();
 loadRuneCatalog();
 loadRuntimeCapabilities();
 loadOllamaModels();
+restoreQuickSelections();
+pollPrefetchStatus();
 
 if (window.lucide) { window.lucide.createIcons(); }
 

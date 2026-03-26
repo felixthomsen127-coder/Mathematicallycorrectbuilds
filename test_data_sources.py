@@ -19,16 +19,83 @@ class _FakeResponse:
         return self._payload
 
 
-def test_strict_scaling_requires_structured_payload():
+def _make_briar_breakdown() -> dict:
+    """Realistic ability breakdown fixture for Briar used across multiple tests."""
+    def _ability(name, ad=0.0, ap=0.0, attack_speed=0.0, ms=0.0, heal=0.0,
+                 damage_type="physical", targeting="single_target",
+                 base=None, cd=None, has_damage_reduction=False):
+        return {
+            "name": name,
+            "ad_ratio": ad,
+            "ap_ratio": ap,
+            "attack_speed_ratio": attack_speed,
+            "ms_ratio": ms,
+            "heal_ratio": heal,
+            "hp_ratio": 0.0,
+            "bonus_hp_ratio": 0.0,
+            "armor_ratio": 0.0,
+            "mr_ratio": 0.0,
+            "scaling_components": [],
+            "scaling_by_application": {"damage": [], "heal": [], "shield": [], "dot": [], "buff_debuff": []},
+            "base_damage": base or [80.0, 120.0, 160.0],
+            "cooldown": cd or [10.0, 9.0, 8.0],
+            "cost": [],
+            "resource": "",
+            "raw_text": "",
+            "source": "wiki-structured-strict",
+            "damage_type": damage_type,
+            "targeting": targeting,
+            "on_hit": False,
+            "is_channeled": False,
+            "is_conditional": False,
+            "is_stack_scaling": False,
+            "range_units": 550.0,
+            "has_damage_reduction": has_damage_reduction,
+            "damage_reduction_ratio": 0.2 if has_damage_reduction else 0.0,
+        }
+    return {
+        "q": _ability("Q", ad=0.8, ap=0.3, damage_type="mixed", base=[60.0, 100.0, 140.0], cd=[8.0, 7.0, 6.0]),
+        "w": _ability("W", attack_speed=0.15, ms=0.25, damage_type="physical", base=[20.0, 30.0, 40.0], cd=[12.0, 11.0, 10.0]),
+        "e": _ability("E", ad=0.4, ap=0.4, damage_type="magic", has_damage_reduction=True, base=[80.0, 120.0, 160.0], cd=[16.0, 15.0, 14.0]),
+        "r": _ability("R", ap=0.6, damage_type="magic", base=[150.0, 250.0, 350.0], cd=[120.0, 100.0, 80.0]),
+    }
+
+
+def test_extract_cast_time_helper_exists_and_parses_template_value():
+    assert hasattr(WikiScalingParser, "_extract_cast_time")
+    text = "| cast_time = 0.25"
+    assert WikiScalingParser._extract_cast_time(text) == 0.25
+
+
+def test_extract_cast_time_parses_rendered_style_value():
+    text = "The champion begins a 0.5 second cast time before firing."
+    assert WikiScalingParser._extract_cast_time(text) == 0.5
+
+
+def test_strict_scaling_requires_structured_payload(monkeypatch):
     parser = WikiScalingParser()
+    briar_breakdown = _make_briar_breakdown()
+    monkeypatch.setattr(parser, "_extract_from_wiki_templates", lambda champion: briar_breakdown)
+    monkeypatch.setattr(parser, "_get_rendered_text", lambda champion: "rendered wiki text for Briar")
+    monkeypatch.setattr(parser, "_extract_sections", lambda text: {"q": "Q deals 80% AD physical damage.", "w": "W grants attack speed.", "e": "E channels for magic damage with 40% AD + 40% AP.", "r": "R deals 60% AP magic damage."})
+    monkeypatch.setattr(parser, "_extract_from_rendered_sections", lambda sections: {})
+    monkeypatch.setattr(parser.cache, "set", lambda *args, **kwargs: None)
+
     scaling = parser.get_scaling("Briar", force_refresh=True)
     assert scaling.source == "wiki-structured-strict+rendered-merge"
     assert "q" in scaling.ability_breakdown
     assert "e" in scaling.ability_breakdown
 
 
-def test_briar_preserves_mixed_ad_ap_and_utility_scalings():
+def test_briar_preserves_mixed_ad_ap_and_utility_scalings(monkeypatch):
     parser = WikiScalingParser()
+    briar_breakdown = _make_briar_breakdown()
+    monkeypatch.setattr(parser, "_extract_from_wiki_templates", lambda champion: briar_breakdown)
+    monkeypatch.setattr(parser, "_get_rendered_text", lambda champion: "rendered wiki text for Briar")
+    monkeypatch.setattr(parser, "_extract_sections", lambda text: {"q": "Q deals 80% AD physical damage.", "w": "W grants attack speed.", "e": "E channels for magic damage with 40% AD + 40% AP.", "r": "R deals 60% AP magic damage."})
+    monkeypatch.setattr(parser, "_extract_from_rendered_sections", lambda sections: {})
+    monkeypatch.setattr(parser.cache, "set", lambda *args, **kwargs: None)
+
     scaling = parser.get_scaling("Briar", force_refresh=True, use_ai_fallback=False)
     q = scaling.ability_breakdown.get("q", {})
     w = scaling.ability_breakdown.get("w", {})
@@ -41,7 +108,9 @@ def test_briar_preserves_mixed_ad_ap_and_utility_scalings():
     assert float(e.get("ad_ratio", 0.0) or 0.0) > 0.0
     assert float(e.get("ap_ratio", 0.0) or 0.0) > 0.0
 
-    # Briar utility patterns include AS/MS scaling.
+    # Briar utility patterns include AS/MS scaling from structured template data.
+    # attack_speed_ratio comes from the mocked _extract_from_wiki_templates breakdown
+    # (attack_speed=0.15), not from text parsing of "W grants attack speed".
     assert float(w.get("attack_speed_ratio", 0.0) or 0.0) > 0.0
     assert float(w.get("ms_ratio", 0.0) or 0.0) > 0.0
 
@@ -156,23 +225,41 @@ def test_ai_fallback_fills_missing_signals_from_wiki_sections(monkeypatch):
     )
     monkeypatch.setattr(parser, "_extract_from_rendered_sections", lambda sections: minimal_breakdown)
 
-    class _FakeAiResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "response": json.dumps(
-                    {
-                        "q": {"ap_ratio": 80, "base_damage": [70, 110, 150], "cooldown": [8, 7, 6]},
-                        "w": {"ad_ratio": 20, "cooldown": [12, 11, 10]},
-                        "e": {"ad_ratio": 15, "cooldown": [16, 15, 14]},
-                        "r": {"ap_ratio": 60, "cooldown": [120, 100, 80]},
-                    }
-                )
+    monkeypatch.setattr(
+        parser,
+        "_extract_with_ai_fallback",
+        lambda champion, sections, missing: {
+            "q": {
+                "name": "Q",
+                "ad_ratio": 0.0,
+                "ap_ratio": 0.8,
+                "attack_speed_ratio": 0.0,
+                "ms_ratio": 0.0,
+                "heal_ratio": 0.0,
+                "hp_ratio": 0.0,
+                "bonus_hp_ratio": 0.0,
+                "armor_ratio": 0.0,
+                "mr_ratio": 0.0,
+                "scaling_components": [],
+                "base_damage": [70.0, 110.0, 150.0],
+                "cooldown": [8.0, 7.0, 6.0],
+                "cost": [],
+                "resource": "",
+                "raw_text": sections.get("q", ""),
+                "source": "wiki-ai-fallback",
+                "damage_type": "magic",
+                "targeting": "unknown",
+                "on_hit": False,
+                "is_channeled": False,
+                "is_conditional": False,
+                "is_stack_scaling": False,
+                "range_units": 0.0,
+                "has_damage_reduction": False,
+                "damage_reduction_ratio": 0.0,
+                "cast_time": 0.0,
             }
-
-    monkeypatch.setattr("data_sources.requests.post", lambda *args, **kwargs: _FakeAiResponse())
+        },
+    )
 
     scaling = parser.get_scaling("Unit AI Champ", force_refresh=True, use_ai_fallback=True)
 
@@ -291,14 +378,17 @@ def test_latest_patch_uses_revision_fingerprint_when_available(monkeypatch):
     client = LeagueWikiClient()
 
     def _fake_get(url, *args, **kwargs):
-        title = kwargs.get("params", {}).get("titles", "")
+        params = kwargs.get("params", {})
+        title = params.get("titles", "")
         if title == "Module:ChampionData/data":
             return _FakeResponse({"query": {"pages": {"1": {"revisions": [{"timestamp": "2026-03-23T10:00:00Z"}]}}}})
         if title == "Module:ItemData/data":
             return _FakeResponse({"query": {"pages": {"1": {"revisions": [{"timestamp": "2026-03-23T11:00:00Z"}]}}}})
         return _FakeResponse({}, status_code=404)
 
+    monkeypatch.setattr("data_sources._http_get", _fake_get)
     monkeypatch.setattr("data_sources.requests.get", _fake_get)
+    monkeypatch.setattr(client.cache, "set", lambda *a, **kw: None)
 
     patch = client.get_latest_patch(force_refresh=True)
 

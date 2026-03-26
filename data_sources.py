@@ -804,8 +804,6 @@ class LeagueWikiClient:
         out["flat_armor_pen"] = LeagueWikiClient._extract_flat_pen(text, "lethality")
         if "omnivamp" in text and "life steal" in text:
             out["damage_amp"] += 0.02
-        if "on-hit" in text:
-            out["bonus_true_damage"] += 8.0
         if "health" in text and "damage" in text and "max" in text:
             out["max_hp_damage"] = max(out["max_hp_damage"], 0.02)
 
@@ -852,12 +850,19 @@ class WikiScalingParser:
 
     AP_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:AP|ability\s*power)", re.IGNORECASE)
     AD_PATTERN = re.compile(
-        r"(\d+(?:\.\d+)?)\s*%\s*(?:(?:bonus|total)\s+)?(?:AD|bAD|tAD|attack\s*damage)",
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:(?:bonus|total)\s+)?(?:AD|bAD|tAD|attack\s*damage)",
         re.IGNORECASE,
     )
-    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*attack\s*speed", re.IGNORECASE)
-    MS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:bonus\s+)?(?:movement\s*speed|move\s*speed)", re.IGNORECASE)
-    HEAL_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:missing\s+health|max\s+health|health)", re.IGNORECASE)
+    # Only match "X% of [pronoun?] attack speed" to capture genuine damage-scaling
+    # coefficients.  Plain "X% attack speed" phrases describe attack-speed BUFFS
+    # (e.g. "gains 80% attack speed") and must NOT be extracted as damage ratios.
+    AS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s+of\s+(?:(?:his|her|their|the|target'?s?)\s+)?attack\s*speed", re.IGNORECASE)
+    MS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:bonus\s+)?(?:movement\s*speed|move\s*speed)", re.IGNORECASE)
+    HEAL_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:missing|max(?:imum)?|current|bonus)?\s*(?:health|HP)", re.IGNORECASE)
+    HP_PATTERN = re.compile(
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?(?:maximum|max|missing|current|bonus)?\s*(?:health|HP|hit\s*points)",
+        re.IGNORECASE,
+    )
     TOKEN_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     PCT_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
     KEY_PATTERNS = {
@@ -1021,6 +1026,10 @@ class WikiScalingParser:
                 "is_stack_scaling": self._is_stack_scaling(text),
                 "range_units": self._extract_range(text),
             }
+            _has_dr, _dr_ratio = self._extract_damage_reduction(text)
+            candidate["has_damage_reduction"] = _has_dr
+            candidate["damage_reduction_ratio"] = _dr_ratio
+            candidate["cast_time"] = self._extract_cast_time(text)
             candidate["scaling_by_application"] = self._group_components_by_application(candidate.get("scaling_components", []))
 
             if key not in breakdown:
@@ -1070,6 +1079,9 @@ class WikiScalingParser:
                     "is_conditional": False,
                     "is_stack_scaling": False,
                     "range_units": 0.0,
+                    "has_damage_reduction": False,
+                    "damage_reduction_ratio": 0.0,
+                    "cast_time": 0.0,
                 },
             )
 
@@ -1313,8 +1325,8 @@ class WikiScalingParser:
                     "ap_ratio": float(all_ratios.get("ap_ratio", 0.0)),
                     "attack_speed_ratio": float(all_ratios.get("attack_speed_ratio", 0.0)),
                     "heal_ratio": float(all_ratios.get("heal_ratio", 0.0)),
-                    "hp_ratio": 0.0,
-                    "bonus_hp_ratio": 0.0,
+                    "hp_ratio": float(all_ratios.get("hp_ratio", 0.0)),
+                    "bonus_hp_ratio": float(all_ratios.get("bonus_hp_ratio", 0.0)),
                     "armor_ratio": 0.0,
                     "mr_ratio": 0.0,
                     "scaling_components": components,
@@ -1332,20 +1344,24 @@ class WikiScalingParser:
                     "is_conditional": self._is_conditional(sections["all"]),
                     "is_stack_scaling": self._is_stack_scaling(sections["all"]),
                     "range_units": self._extract_range(sections["all"]),
+                    "has_damage_reduction": self._extract_damage_reduction(sections["all"])[0],
+                    "damage_reduction_ratio": self._extract_damage_reduction(sections["all"])[1],
+                    "cast_time": self._extract_cast_time(sections["all"]),
                 }
             return breakdown
 
         for key, text in sections.items():
             ratios = self._extract_ratio_values(text)
             components = self._extract_scaling_components(text)
+            _has_dr, _dr_ratio = self._extract_damage_reduction(text)
             breakdown[key] = {
                 "name": key.upper(),
                 "ad_ratio": float(ratios.get("ad_ratio", 0.0)),
                 "ap_ratio": float(ratios.get("ap_ratio", 0.0)),
                 "attack_speed_ratio": float(ratios.get("attack_speed_ratio", 0.0)),
                 "heal_ratio": float(ratios.get("heal_ratio", 0.0)),
-                "hp_ratio": 0.0,
-                "bonus_hp_ratio": 0.0,
+                "hp_ratio": float(ratios.get("hp_ratio", 0.0)),
+                "bonus_hp_ratio": float(ratios.get("bonus_hp_ratio", 0.0)),
                 "armor_ratio": 0.0,
                 "mr_ratio": 0.0,
                 "scaling_components": components,
@@ -1363,6 +1379,9 @@ class WikiScalingParser:
                 "is_conditional": self._is_conditional(text),
                 "is_stack_scaling": self._is_stack_scaling(text),
                 "range_units": self._extract_range(text),
+                "has_damage_reduction": _has_dr,
+                "damage_reduction_ratio": _dr_ratio,
+                "cast_time": self._extract_cast_time(text),
             }
 
         for key in ("q", "w", "e", "r"):
@@ -1393,6 +1412,9 @@ class WikiScalingParser:
                     "is_conditional": False,
                     "is_stack_scaling": False,
                     "range_units": 0.0,
+                    "has_damage_reduction": False,
+                    "damage_reduction_ratio": 0.0,
+                    "cast_time": 0.0,
                 },
             )
         return breakdown
@@ -1503,6 +1525,10 @@ class WikiScalingParser:
             _sec_range = float(sec_values.get("range_units") or 0.0)
             if _sec_range > float(merged[key].get("range_units") or 0.0):
                 merged[key]["range_units"] = _sec_range
+            # cast_time: take maximum (more conservative — higher means fewer auto attacks)
+            _sec_ct = float(sec_values.get("cast_time") or 0.0)
+            if _sec_ct > float(merged[key].get("cast_time") or 0.0):
+                merged[key]["cast_time"] = _sec_ct
             merged[key]["scaling_components"] = self._merge_scaling_components(
                 merged[key].get("scaling_components", []),
                 sec_values.get("scaling_components", []),
@@ -1584,30 +1610,83 @@ class WikiScalingParser:
         payload = {
             "model": "mistral",
             "prompt": json.dumps(instruction, ensure_ascii=True),
-            "stream": False,
+            "stream": True,
             "format": "json",
             "options": {"temperature": 0.1, "num_predict": 900},
         }
 
         try:
-            res = requests.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=min(self.timeout_seconds, 8.0))
+            res = requests.post(
+                "http://127.0.0.1:11434/api/generate",
+                json=payload,
+                stream=True,
+                timeout=min(self.timeout_seconds, 60.0),
+            )
             res.raise_for_status()
-            raw = str(res.json().get("response", "") or "")
+            raw_parts: List[str] = []
+            for line in res.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    raw_parts.append(str(chunk.get("response", "") or ""))
+                    if chunk.get("done"):
+                        break
+                except Exception:
+                    continue
+            raw = "".join(raw_parts)
             if not raw:
                 return {}
             parsed: Any
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-                if not match:
-                    return {}
-                parsed = json.loads(match.group(0))
+                cleaned = self._clean_ai_json_response(raw)
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+                    if not match:
+                        return {}
+                    try:
+                        parsed = json.loads(match.group(0))
+                    except json.JSONDecodeError:
+                        return {}
             if not isinstance(parsed, dict):
                 return {}
             return self._sanitize_ai_breakdown(parsed, sections)
         except Exception:
             return {}
+
+    @staticmethod
+    def _clean_ai_json_response(raw: str) -> str:
+        """Clean common LLM JSON formatting issues before parsing.
+
+        LLMs often emit:
+        - Control characters embedded in strings
+        - Trailing commas before closing braces/brackets
+        - Markdown code fences (```json ... ```)
+        - Single-line // comments
+        - Non-breaking spaces and other unicode whitespace
+        """
+        # Strip markdown code fences
+        text = re.sub(r"```(?:json)?\s*", "", raw or "")
+        text = text.replace("```", "")
+
+        # Remove // single-line comments (not valid JSON)
+        text = re.sub(r"//[^\n]*", "", text)
+
+        # Replace control characters (except standard whitespace) with a space
+        # This handles the "Expecting ',' delimiter" error from embedded ASCII control chars
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+
+        # Fix trailing commas before ] or } — not valid JSON but common in LLM output
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+
+        # Replace non-breaking spaces and similar unicode whitespace with regular space
+        text = re.sub(r"[\u00a0\u2009\u200b\u200c\u200d\ufeff]", " ", text)
+
+        return text.strip()
 
     def _sanitize_ai_breakdown(self, payload: Dict[str, Any], sections: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
         raw_map = payload.get("ability_breakdown", payload)
@@ -1662,6 +1741,9 @@ class WikiScalingParser:
                 "is_conditional": self._is_conditional(_sec_text),
                 "is_stack_scaling": self._is_stack_scaling(_sec_text),
                 "range_units": self._extract_range(_sec_text),
+                "has_damage_reduction": self._extract_damage_reduction(_sec_text)[0],
+                "damage_reduction_ratio": self._extract_damage_reduction(_sec_text)[1],
+                "cast_time": self._extract_cast_time(_sec_text),
             }
             out[norm_key]["scaling_by_application"] = self._group_components_by_application(out[norm_key].get("scaling_components", []))
         return out
@@ -1834,7 +1916,6 @@ class WikiScalingParser:
         return " ".join(text.split())
 
     def _extract_ratio_values(self, text: str) -> Dict[str, float]:
-        as_labeled = self._extract_labeled_template_series_pct(text, r"bonus\s+attack\s+speed|attack\s+speed")
         ms_labeled = self._extract_labeled_template_series_pct(text, r"bonus\s+(?:movement|move)\s+speed|(?:movement|move)\s+speed")
 
         cleaned = self._normalize_wiki_markup_text(text)
@@ -1844,10 +1925,33 @@ class WikiScalingParser:
         ms_values = [float(v) for v in self.MS_PATTERN.findall(cleaned)]
         heal_values = [float(v) for v in self.HEAL_PATTERN.findall(cleaned)]
 
+        # Extract HP-scaling values separately so abilities like Garen R (% max HP
+        # damage) are captured in hp_ratio rather than conflated with heal_ratio.
+        hp_all = [float(v) for v in self.HP_PATTERN.findall(cleaned)]
+        # Bonus HP scalings typically appear as "bonus health" in the text.
+        bonus_hp_values: List[float] = []
+        hp_values: List[float] = []
+        lower_cleaned = cleaned.lower()
+        for m in self.HP_PATTERN.finditer(cleaned):
+            val = float(m.group(1))
+            context_start = max(0, m.start() - 40)
+            context = lower_cleaned[context_start : m.end() + 40]
+            if "bonus" in context:
+                bonus_hp_values.append(val)
+            else:
+                hp_values.append(val)
+        # Values that already appeared in heal_values (heal/restore context) should
+        # stay as heal_ratio; strip them from hp extraction to avoid double-counting.
+        heal_set = set(round(v, 4) for v in heal_values)
+        hp_values = [v for v in hp_values if round(v, 4) not in heal_set]
+        bonus_hp_values = [v for v in bonus_hp_values if round(v, 4) not in heal_set]
+
         # Support wiki value-box formats where stat label appears before the percentage list.
-        as_values.extend(self._extract_keyword_series_pct(cleaned, r"attack\s*speed"))
+        # NOTE: attack-speed extraction is intentionally omitted here because "attack speed"
+        # appears in buff-granting ability text (e.g. "gains 40% attack speed") which
+        # would be incorrectly read as a damage-scaling coefficient.  AS_PATTERN already
+        # uses a strict "X% of attack speed" form to avoid this false-positive extraction.
         ms_values.extend(self._extract_keyword_series_pct(cleaned, r"(?:movement|move)\s*speed"))
-        as_values.extend(as_labeled)
         ms_values.extend(ms_labeled)
 
         return {
@@ -1856,6 +1960,8 @@ class WikiScalingParser:
             "attack_speed_ratio": self._normalize_pct(as_values, fallback=0.0),
             "ms_ratio": self._normalize_pct(ms_values, fallback=0.0),
             "heal_ratio": self._normalize_pct(heal_values, fallback=0.0),
+            "hp_ratio": self._normalize_pct(hp_values, fallback=0.0),
+            "bonus_hp_ratio": self._normalize_pct(bonus_hp_values, fallback=0.0),
         }
 
     def _extract_keyword_series_pct(self, text: str, keyword_pattern: str) -> List[float]:
@@ -1891,7 +1997,9 @@ class WikiScalingParser:
         text = self._normalize_wiki_markup_text(text)
 
         pattern = re.compile(
-            r"(\d+(?:\.\d+)?)\s*%\s*((?:bonus|total)\s+)?(AD|bAD|tAD|attack\s*damage|AP|ability\s*power|attack\s*speed|movement\s*speed|move\s*speed|armor|magic\s*resist|mr|bonus\s*health|max\s*health|health)",
+            r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+(?:(?:his|her|their|the|target'?s?)\s+))?"
+            r"((?:bonus|total)\s+)?"
+            r"(AD|bAD|tAD|attack\s*damage|AP|ability\s*power|attack\s*speed|movement\s*speed|move\s*speed|armor|magic\s*resist|mr|bonus\s*health|max(?:imum)?\s*health|missing\s*health|health|HP)",
             re.IGNORECASE,
         )
         lower = text.lower()
@@ -1925,7 +2033,13 @@ class WikiScalingParser:
             elif "bonus health" in stat_token:
                 stat = "bonus_hp"
                 modifier = "total"
-            elif "max health" in stat_token or stat_token == "health":
+            elif "missing health" in stat_token or "missing hp" in stat_token:
+                stat = "hp"
+                modifier = "missing"
+            elif "max" in stat_token and ("health" in stat_token or "hp" in stat_token):
+                stat = "bonus_hp" if modifier_token.startswith("bonus") else "hp"
+                modifier = "max"
+            elif "health" in stat_token or stat_token == "hp" or stat_token == "hit points":
                 stat = "bonus_hp" if modifier_token.startswith("bonus") else "hp"
                 modifier = "total"
             elif "armor" in stat_token:
@@ -2101,6 +2215,69 @@ class WikiScalingParser:
         return bool(re.search(r"on.hit|applies?\s+on.hit|on\s+hit", text, re.IGNORECASE))
 
     @staticmethod
+    def _extract_damage_reduction(text: str) -> Tuple[bool, float]:
+        """Detect if the ability grants the champion self damage reduction.
+
+        Returns ``(has_damage_reduction, reduction_ratio)`` where ``reduction_ratio``
+        is expressed as a fraction (0.0–1.0).  Examples that trigger this:
+          - Warwick E (Primal Howl): "reduces damage taken by 35%"
+          - Briar E (Chilling Scream): "reduces all damage taken by 20%"
+          - Garen W (Courage): "reduces damage taken by 30%"
+        """
+        if not text:
+            return False, 0.0
+        lower = text.lower()
+        # Keywords that indicate a self-damage-reduction effect
+        _REDUCTION_KEYWORDS = (
+            "damage taken",
+            "damage reduction",
+            "reduces damage",
+            "reduce damage",
+            "incoming damage",
+            "damage received",
+            "take less damage",
+            "takes less damage",
+            "less damage",
+            "block damage",
+            "mitigates damage",
+        )
+        if not any(kw in lower for kw in _REDUCTION_KEYWORDS):
+            return False, 0.0
+        # Look for a nearby percentage value
+        pattern = re.compile(
+            r"(?:reduces?|reduce|block[s]?|mitigate[s]?)\s*(?:all\s+)?(?:incoming\s+)?"
+            r"(?:physical\s+|magic(?:al)?\s+|true\s+)?damage[^%]{0,40}?(\d+(?:\.\d+)?)\s*%"
+            r"|(\d+(?:\.\d+)?)\s*%[^%]{0,40}?(?:damage\s+reduction|less\s+damage\s+taken|less\s+damage)"
+            r"|takes?\s+(\d+(?:\.\d+)?)\s*%\s+less\s+damage"
+            r"|damage\s+taken\s+(?:is\s+)?(?:reduced?\s+by|by)\s+(\d+(?:\.\d+)?)\s*%",
+            re.IGNORECASE,
+        )
+        best = 0.0
+        for m in pattern.finditer(lower):
+            val_str = m.group(1) or m.group(2) or m.group(3) or m.group(4) or "0"
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            if 1.0 < val <= 100.0:
+                val = val / 100.0
+            if val > best:
+                best = val
+        if best <= 0.0:
+            # Fallback: just check "damage taken" near any percentage
+            generic = re.compile(r"(\d+(?:\.\d+)?)\s*%[^.\n]{0,50}damage\s+taken", re.IGNORECASE)
+            for m in generic.finditer(lower):
+                try:
+                    val = float(m.group(1))
+                    if 1.0 < val <= 100.0:
+                        val = val / 100.0
+                    if val > best:
+                        best = val
+                except ValueError:
+                    continue
+        return best > 0.0, min(best, 0.80)
+
+    @staticmethod
     def _extract_channeled(text: str) -> bool:
         """Return True if the ability channels or has a significant wind-up."""
         if not text:
@@ -2151,6 +2328,34 @@ class WikiScalingParser:
                 pass
         return 0.0
 
+    @staticmethod
+    def _extract_cast_time(text: str) -> float:
+        """Return the ability cast time in seconds (0.0 if absent or not parseable)."""
+        if not text:
+            return 0.0
+        # Template-style: | casttime = 0.25  or  | cast_time = 0.25
+        m = re.search(r"\|\s*cast_?time\s*=\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+        if m:
+            try:
+                return max(0.0, min(2.0, float(m.group(1))))
+            except ValueError:
+                pass
+        # Rendered-style: "0.25 second cast time" or "0.5s cast time"
+        m = re.search(r"(\d+(?:\.\d+)?)\s*s(?:econd)?\s+cast\s*time", text, re.IGNORECASE)
+        if m:
+            try:
+                return max(0.0, min(2.0, float(m.group(1))))
+            except ValueError:
+                pass
+        # Rendered-style: "cast time: 0.5" or "Cast time 0.25"
+        m = re.search(r"\bcast\s*time\s*:?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+        if m:
+            try:
+                return max(0.0, min(2.0, float(m.group(1))))
+            except ValueError:
+                pass
+        return 0.0
+
     def _extract_ratio_values_from_tokens(self, text: str, block: Dict[str, Any]) -> Dict[str, float]:
         out = {
             "ad_ratio": 0.0,
@@ -2188,6 +2393,8 @@ class WikiScalingParser:
             "ap_ratio": 0.0,
             "attack_speed_ratio": 0.0,
             "heal_ratio": 0.0,
+            "hp_ratio": 0.0,
+            "bonus_hp_ratio": 0.0,
         }
         if not isinstance(vars_block, list):
             return out
@@ -2203,11 +2410,19 @@ class WikiScalingParser:
             value = max(coeff_values)
             if "spelldamage" in link or "abilitypower" in link or link == "ap":
                 out["ap_ratio"] = max(out["ap_ratio"], value)
-            elif "bonusattackdamage" in link or "attackdamage" in link or link in {"ad", "bonusad"}:
+            elif "bonusattackdamage" in link or link in {"bonusad"}:
+                out["ad_ratio"] = max(out["ad_ratio"], value)
+            elif "attackdamage" in link or link == "ad":
                 out["ad_ratio"] = max(out["ad_ratio"], value)
             elif "attackspeed" in link:
                 out["attack_speed_ratio"] = max(out["attack_speed_ratio"], value)
-            elif "health" in link or "missinghealth" in link:
+            elif "bonushealth" in link:
+                out["bonus_hp_ratio"] = max(out["bonus_hp_ratio"], value)
+            elif "maxhealth" in link or "currenthealth" in link:
+                out["hp_ratio"] = max(out["hp_ratio"], value)
+            elif "missinghealth" in link:
+                out["hp_ratio"] = max(out["hp_ratio"], value)
+            elif "health" in link:
                 out["heal_ratio"] = max(out["heal_ratio"], value)
         return out
 
@@ -2414,7 +2629,7 @@ class OllamaClient:
     BASE = "http://localhost:11434"
     MAX_FEEDBACK_PER_CHAMP = 50
 
-    def __init__(self, timeout_seconds: float = 60.0):
+    def __init__(self, timeout_seconds: float = 180.0):
         self.timeout_seconds = timeout_seconds
         self.cache = LocalJsonCache()
 
@@ -2451,19 +2666,42 @@ class OllamaClient:
         payload = {
             "model": model,
             "prompt": prompt,
-            "stream": False,
+            "stream": True,
             "format": "json",
-            "options": {"temperature": 0.4, "num_predict": 600},
+            "options": {"temperature": 0.45, "num_predict": 900},
         }
-        res = requests.post(f"{self.BASE}/api/generate", json=payload, timeout=self.timeout_seconds)
+        # Use streaming to avoid read timeouts on slow hardware.  Each streamed
+        # chunk is a small JSON line so the connection stays alive while the LLM
+        # generates tokens, and we accumulate the full response text ourselves.
+        res = requests.post(
+            f"{self.BASE}/api/generate",
+            json=payload,
+            stream=True,
+            timeout=self.timeout_seconds,
+        )
         res.raise_for_status()
-        raw = res.json().get("response", "{}")
+        raw_parts: List[str] = []
+        for line in res.iter_lines():
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                raw_parts.append(str(chunk.get("response", "") or ""))
+                if chunk.get("done"):
+                    break
+            except Exception:
+                continue
+        raw = "".join(raw_parts)
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
-            # Try to extract first JSON object from response
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            result = json.loads(match.group(0)) if match else {}
+            # Clean common LLM JSON issues (trailing commas, control chars, code fences)
+            cleaned = WikiScalingParser._clean_ai_json_response(raw)
+            try:
+                result = json.loads(cleaned)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                result = json.loads(match.group(0)) if match else {}
 
         candidates = result.get("candidates")
         if not isinstance(candidates, list):
@@ -2570,35 +2808,65 @@ class OllamaClient:
                 names = ", ".join(x.get("name", "") for x in b.get("order", []))
                 score = b.get("weighted_score", 0)
                 lines.append(f"  #{i}: [{names}] (score {score})")
-            top_ref = "Mathematical top builds for reference (do NOT just copy these — give a creative alternative):\n" + "\n".join(lines) + "\n"
+            top_ref = (
+                "FORBIDDEN — calculator top builds (do NOT copy or closely replicate these):\n"
+                + "\n".join(lines)
+                + "\n"
+            )
 
         damage_focus = weights.get("damage", 1.0)
         heal_focus = weights.get("healing", 0.0)
         tank_focus = weights.get("tankiness", 0.0)
 
+        enemy_armor = enemy_profile.get("target_armor", 120)
+        enemy_mr = enemy_profile.get("target_mr", 90)
+        enemy_hp = enemy_profile.get("target_hp", 3200)
+        matchup_notes = []
+        if enemy_armor > 140:
+            matchup_notes.append("enemy has very high armor — % armor pen and anti-tank items are key")
+        elif enemy_armor < 60:
+            matchup_notes.append("enemy has low armor — flat armor pen and lethality items shine")
+        if enemy_mr > 120:
+            matchup_notes.append("enemy has high MR — % magic pen (Void Staff) is critical")
+        elif enemy_mr < 50:
+            matchup_notes.append("enemy has low MR — flat magic pen gives outsized value")
+        if enemy_hp > 4000:
+            matchup_notes.append("enemy is a tank — max-HP damage items (Bork, Liandry's) are valuable")
+        matchup_hint = "; ".join(matchup_notes) if matchup_notes else "balanced matchup"
+
         return f"""You are an expert League of Legends build theorist advising on {champion}.
 
 Objective weights: damage={damage_focus}, healing={heal_focus}, tankiness={tank_focus}
-Enemy profile: HP={enemy_profile.get('target_hp', 3200)}, Armor={enemy_profile.get('target_armor', 120)}, MR={enemy_profile.get('target_mr', 90)}
+Enemy profile: HP={enemy_hp}, Armor={enemy_armor}, MR={enemy_mr}
+Matchup context: {matchup_hint}
 
 {top_ref}{good_block}{bad_block}
-Generate 3 different 6-item build candidates for {champion} optimised for the objective weights above.
+Your job is to generate 3 build candidates that the MATH CALCULATOR would MISS or rank lower than they deserve.
+Think creatively about:
+- Non-standard or off-meta keystones that have hidden synergy with this champion's kit
+- On-hit items for auto-attack-reliant melee champions
+- Utility items that provide soft stats (slow, shred, healing) the optimizer undervalues
+- Burst vs sustained playstyle tradeoffs
+- How the specific enemy matchup (armor/MR/HP values above) shapes item priority
+- Unconventional item orderings or 2-item spike timings
+
 Rules:
-- Candidate 1 should be stable/meta-adjacent.
-- Candidate 2 should be balanced but not a direct copy of known meta.
-- Candidate 3 should be high-risk/high-reward and intentionally innovative.
-- Include rune hints for each candidate.
-- Avoid duplicate items in a candidate.
+- Candidate 1: "meta-adjacent" — take a known strong foundation but swap one item for something the calculator ignores
+- Candidate 2: "playstyle variant" — build optimised for a different win condition (e.g. sustained vs burst, all-in vs poke)
+- Candidate 3: "off-meta innovation" — genuinely non-standard build that could catch enemies off guard
+- Each candidate must have exactly 6 items with no duplicates
+- Include rune hints that synergize with the build philosophy
+- Justify WHY each candidate beats the calculator on hidden value
 Respond ONLY with valid JSON in this exact format:
 {{
     "candidates": [
         {{
-            "label": "stable",
+            "label": "meta-adjacent",
             "items": ["Item Name 1", "Item Name 2", "Item Name 3", "Item Name 4", "Item Name 5", "Item Name 6"],
             "rune_hints": ["Keystone", "Primary Tree", "Secondary Tree"],
-            "reasoning": "2-3 sentence explanation",
-            "playstyle_note": "1 sentence gameplay note",
-            "innovation_thesis": "short sentence describing what makes this candidate distinct"
+            "reasoning": "2-3 sentence explanation of the build's core idea",
+            "playstyle_note": "1 sentence describing how to play this build",
+            "innovation_thesis": "1 sentence on what hidden value this build captures that the calculator misses"
         }}
     ]
 }}"""

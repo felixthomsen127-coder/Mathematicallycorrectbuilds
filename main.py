@@ -1,11 +1,14 @@
 ﻿from __future__ import annotations
 
 from collections import defaultdict, deque
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict
 import hashlib
 import json
 import os
 from pathlib import Path
+import random
+import re
 import shutil
 from threading import Lock, Thread
 import time
@@ -32,7 +35,7 @@ from data_sources import (
     _safe_json,
     RATE_LIMITER,
 )
-from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages
+from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages, prewarm_meta_snapshot, _safe_float as _safe_float
 from optimizer import BuildConstraints, BuildOptimizer, EnemyProfile, ItemStats, ObjectiveWeights, RuneChoice, RunePage, SearchSettings
 import simulation as sim_engine
 
@@ -128,19 +131,19 @@ _CHAMPION_SLUG_INDEX: Dict[str, Any] = {
 
 _DEFAULT_SHARD_OPTIONS: List[List[Dict[str, str]]] = [
   [
-    {"id": "5008", "name": "Adaptive Force"},
-    {"id": "5005", "name": "Attack Speed"},
-    {"id": "5007", "name": "Ability Haste"},
+    {"id": "5008", "name": "Adaptive Force", "icon_url": "/api/icon/shard/5008"},
+    {"id": "5005", "name": "Attack Speed", "icon_url": "/api/icon/shard/5005"},
+    {"id": "5007", "name": "Ability Haste", "icon_url": "/api/icon/shard/5007"},
   ],
   [
-    {"id": "5008b", "name": "Adaptive Force"},
-    {"id": "5002", "name": "Movement Speed"},
-    {"id": "5003", "name": "Scaling Health"},
+    {"id": "5008b", "name": "Adaptive Force", "icon_url": "/api/icon/shard/5008"},
+    {"id": "5002", "name": "Armor", "icon_url": "/api/icon/shard/5002"},
+    {"id": "5003", "name": "Magic Resist", "icon_url": "/api/icon/shard/5003"},
   ],
   [
-    {"id": "5011", "name": "Health"},
-    {"id": "5013", "name": "Tenacity and Slow Resist"},
-    {"id": "5001", "name": "Health Scaling"},
+    {"id": "5011", "name": "Health", "icon_url": "/api/icon/shard/5011"},
+    {"id": "5013", "name": "Tenacity and Slow Resist", "icon_url": "/api/icon/shard/5013"},
+    {"id": "5001", "name": "Health Scaling", "icon_url": "/api/icon/shard/5001"},
   ],
 ]
 
@@ -155,6 +158,421 @@ _sweep_state: Dict[str, Any] = {
   "last_report": None,
   "last_error": "",
 }
+_meta_snapshot_lock = Lock()
+_meta_snapshot_running: Dict[str, float] = {}
+_meta_snapshot_recent: Dict[str, Dict[str, Any]] = {}
+_background_cache = LeagueWikiClient().cache
+_executor_lock = Lock()
+_optimize_executor: Optional[ProcessPoolExecutor] = None
+_prefetch_lock = Lock()
+_prefetch_queue: Deque[Dict[str, Any]] = deque()
+_prefetch_pending_keys: set[str] = set()
+_prefetch_completed_keys: set[str] = set()
+_prefetch_thread: Optional[Thread] = None
+_prefetch_state: Dict[str, Any] = {
+  "running": False,
+  "patch": "",
+  "started_at": 0.0,
+  "updated_at": 0.0,
+  "completed_at": 0.0,
+  "total": 0,
+  "completed": 0,
+  "failed": 0,
+  "current": None,
+  "current_label": "",
+  "queue_size": 0,
+  "errors": [],
+  "last_error": "",
+  "ready": False,
+  "priority_champion": "",
+  "totals_by_kind": {},
+  "completed_by_kind": {},
+}
+
+_PREFETCH_ROLE_OPTIONS = ("jungle", "top", "middle", "adc", "support")
+_PREFETCH_TIER_OPTIONS = ("emerald_plus", "diamond_plus", "master_plus", "platinum_plus")
+_PREFETCH_REGION_OPTIONS = ("global", "na", "euw", "kr")
+
+
+def _meta_snapshot_key(champion: str, role: str, tier: str, region: str, patch: str) -> str:
+  return "|".join([
+    str(champion or "").strip().lower(),
+    str(role or "").strip().lower(),
+    str(tier or "").strip().lower(),
+    str(region or "").strip().lower(),
+    str(patch or "").strip().lower(),
+  ])
+
+
+def _prefetch_marker_key(patch: str) -> str:
+  token = str(patch or "live").strip().lower() or "live"
+  return f"startup_prefetch_{token}"
+
+
+def _load_prefetch_marker(patch: str) -> Dict[str, Any]:
+  cached = _background_cache.get(_prefetch_marker_key(patch))
+  return dict(cached) if isinstance(cached, dict) else {}
+
+
+def _save_prefetch_marker(patch: str, payload: Dict[str, Any]) -> None:
+  try:
+    _background_cache.set(_prefetch_marker_key(patch), dict(payload))
+  except Exception:
+    pass
+
+
+def _balanced_worker_count() -> int:
+  cpu_count = os.cpu_count() or 2
+  physical = 0
+  try:
+    import psutil  # type: ignore[import-not-found]
+
+    physical = int(psutil.cpu_count(logical=False) or 0)
+  except Exception:
+    physical = 0
+  baseline = physical or cpu_count
+  return max(1, min(max(1, cpu_count - 1), baseline, 4))
+
+
+def _get_optimize_executor() -> ProcessPoolExecutor:
+  global _optimize_executor
+  with _executor_lock:
+    if _optimize_executor is None:
+      _optimize_executor = ProcessPoolExecutor(max_workers=_balanced_worker_count())
+    return _optimize_executor
+
+
+def _prefetch_task_key(task: Dict[str, Any]) -> str:
+  kind = str(task.get("kind", "") or "")
+  if kind == "items":
+    return f"items|{task.get('patch', '')}"
+  if kind == "champions":
+    return f"champions|{task.get('patch', '')}"
+  if kind == "scaling":
+    return f"scaling|{task.get('patch', '')}|{task.get('champion', '')}"
+  if kind == "meta":
+    return "meta|{patch}|{champion}|{role}|{tier}|{region}".format(
+      patch=task.get("patch", ""),
+      champion=task.get("champion", ""),
+      role=task.get("role", ""),
+      tier=task.get("tier", ""),
+      region=task.get("region", ""),
+    )
+  return json.dumps(task, sort_keys=True)
+
+
+def _prefetch_task_label(task: Dict[str, Any]) -> str:
+  kind = str(task.get("kind", "") or "")
+  if kind == "items":
+    return "Fetching item catalog"
+  if kind == "champions":
+    return "Fetching champion catalog"
+  if kind == "scaling":
+    return f"Scaling: {task.get('champion', 'unknown')}"
+  if kind == "meta":
+    return (
+      f"Meta: {task.get('champion', 'unknown')} | {task.get('role', 'role')} | "
+      f"{task.get('tier', 'tier')} | {task.get('region', 'region')}"
+    )
+  return "Background fetch"
+
+
+def _prefetch_progress_payload() -> Dict[str, Any]:
+  with _prefetch_lock:
+    total = int(_prefetch_state.get("total", 0) or 0)
+    completed = int(_prefetch_state.get("completed", 0) or 0)
+    failed = int(_prefetch_state.get("failed", 0) or 0)
+    running = bool(_prefetch_state.get("running"))
+    pct = 100.0 if total and completed >= total else ((completed / total) * 100.0 if total else (100.0 if _prefetch_state.get("ready") else 0.0))
+    totals_by_kind = dict(_prefetch_state.get("totals_by_kind", {}) or {})
+    completed_by_kind = dict(_prefetch_state.get("completed_by_kind", {}) or {})
+    critical_total = sum(int(totals_by_kind.get(kind, 0) or 0) for kind in ("items", "champions", "scaling"))
+    critical_completed = sum(int(completed_by_kind.get(kind, 0) or 0) for kind in ("items", "champions", "scaling"))
+    critical_pct = 100.0 if critical_total and critical_completed >= critical_total else ((critical_completed / critical_total) * 100.0 if critical_total else (100.0 if _prefetch_state.get("ready") else 0.0))
+    return {
+      **_prefetch_state,
+      "progress_percent": round(max(0.0, min(100.0, pct)), 1),
+      "critical_progress_percent": round(max(0.0, min(100.0, critical_pct)), 1),
+      "critical_total": critical_total,
+      "critical_completed": critical_completed,
+      "queue_size": len(_prefetch_queue),
+      "completed": completed,
+      "failed": failed,
+      "total": total,
+      "running": running,
+    }
+
+
+def _enqueue_prefetch_task(task: Dict[str, Any], *, front: bool = False) -> bool:
+  key = _prefetch_task_key(task)
+  with _prefetch_lock:
+    if key in _prefetch_completed_keys or key in _prefetch_pending_keys:
+      return False
+    if front:
+      _prefetch_queue.appendleft(task)
+    else:
+      _prefetch_queue.append(task)
+    _prefetch_pending_keys.add(key)
+    _prefetch_state["queue_size"] = len(_prefetch_queue)
+    return True
+
+
+def _build_prefetch_tasks(patch: str) -> List[Dict[str, Any]]:
+  champions = riot.get_all_champions(patch, force_refresh=False)
+  tasks: List[Dict[str, Any]] = [
+    {"kind": "items", "patch": patch},
+    {"kind": "champions", "patch": patch},
+  ]
+  names = [str(row.get("name", "") or "").strip() for row in champions if str(row.get("name", "") or "").strip()]
+  for champion in names:
+    tasks.append({"kind": "scaling", "patch": patch, "champion": champion})
+  for champion in names:
+    for role in _PREFETCH_ROLE_OPTIONS:
+      for tier in _PREFETCH_TIER_OPTIONS:
+        for region in _PREFETCH_REGION_OPTIONS:
+          tasks.append(
+            {
+              "kind": "meta",
+              "patch": patch,
+              "champion": champion,
+              "role": role,
+              "tier": tier,
+              "region": region,
+            }
+          )
+  return tasks
+
+
+def _execute_prefetch_task(task: Dict[str, Any]) -> None:
+  kind = str(task.get("kind", "") or "")
+  patch = str(task.get("patch", "") or "")
+  force_refresh = bool(task.get("force_refresh", False))
+  if kind == "items":
+    riot.get_items(patch, force_refresh=force_refresh)
+    return
+  if kind == "champions":
+    riot.get_all_champions(patch, force_refresh=force_refresh)
+    return
+  if kind == "scaling":
+    champion = str(task.get("champion", "") or "").strip()
+    if champion:
+      wiki.get_scaling(champion, force_refresh=force_refresh, use_ai_fallback=False)
+    return
+  if kind == "meta":
+    champion = str(task.get("champion", "") or "").strip()
+    if champion:
+      prewarm_meta_snapshot(
+        champion=champion,
+        role=str(task.get("role", "jungle") or "jungle"),
+        tier=str(task.get("tier", "emerald_plus") or "emerald_plus"),
+        region=str(task.get("region", "global") or "global"),
+        patch=str(task.get("meta_patch", "live") or task.get("patch", "live") or "live"),
+      )
+
+
+def _run_prefetch_cycle(patch: str, force_refresh: bool = False) -> None:
+  marker = _load_prefetch_marker(patch)
+  if marker.get("complete") and not force_refresh:
+    with _prefetch_lock:
+      totals_by_kind = dict(marker.get("totals_by_kind", {}) or {})
+      _prefetch_state.update(
+        {
+          "running": False,
+          "patch": patch,
+          "started_at": float(marker.get("started_at", 0.0) or 0.0),
+          "updated_at": float(marker.get("completed_at", 0.0) or time.time()),
+          "completed_at": float(marker.get("completed_at", 0.0) or time.time()),
+          "total": int(marker.get("total", 0) or 0),
+          "completed": int(marker.get("total", 0) or 0),
+          "failed": int(marker.get("failed", 0) or 0),
+          "current": None,
+          "current_label": "Patch cache ready",
+          "queue_size": 0,
+          "last_error": "",
+          "ready": True,
+          "totals_by_kind": totals_by_kind,
+          "completed_by_kind": totals_by_kind,
+        }
+      )
+    return
+
+  tasks = _build_prefetch_tasks(patch)
+  totals_by_kind: Dict[str, int] = defaultdict(int)
+  for task in tasks:
+    totals_by_kind[str(task.get("kind", "other") or "other")] += 1
+  with _prefetch_lock:
+    _prefetch_queue.clear()
+    _prefetch_pending_keys.clear()
+    _prefetch_completed_keys.clear()
+    _prefetch_state.update(
+      {
+        "running": True,
+        "patch": patch,
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "completed_at": 0.0,
+        "total": len(tasks),
+        "completed": 0,
+        "failed": 0,
+        "current": None,
+        "current_label": "Preparing background fetch",
+        "queue_size": 0,
+        "errors": [],
+        "last_error": "",
+        "ready": False,
+        "totals_by_kind": dict(totals_by_kind),
+        "completed_by_kind": {},
+      }
+    )
+  for task in tasks:
+    _enqueue_prefetch_task({**task, "force_refresh": force_refresh})
+
+  while True:
+    with _prefetch_lock:
+      if not _prefetch_queue:
+        _prefetch_state["running"] = False
+        _prefetch_state["updated_at"] = time.time()
+        _prefetch_state["completed_at"] = time.time()
+        _prefetch_state["current"] = None
+        _prefetch_state["current_label"] = "Patch cache ready"
+        _prefetch_state["queue_size"] = 0
+        _prefetch_state["ready"] = True
+        _save_prefetch_marker(
+          patch,
+          {
+            "complete": True,
+            "started_at": _prefetch_state.get("started_at", 0.0),
+            "completed_at": _prefetch_state.get("completed_at", 0.0),
+            "total": _prefetch_state.get("total", 0),
+            "failed": _prefetch_state.get("failed", 0),
+            "totals_by_kind": _prefetch_state.get("totals_by_kind", {}),
+          },
+        )
+        return
+      task = _prefetch_queue.popleft()
+      key = _prefetch_task_key(task)
+      _prefetch_state["current"] = dict(task)
+      _prefetch_state["current_label"] = _prefetch_task_label(task)
+      _prefetch_state["queue_size"] = len(_prefetch_queue)
+      _prefetch_state["updated_at"] = time.time()
+    try:
+      _execute_prefetch_task(task)
+    except Exception as exc:
+      with _prefetch_lock:
+        _prefetch_state["failed"] = int(_prefetch_state.get("failed", 0) or 0) + 1
+        _prefetch_state["last_error"] = str(exc)
+        errors = list(_prefetch_state.get("errors", []))[-14:]
+        errors.append({"task": _prefetch_task_label(task), "error": str(exc)})
+        _prefetch_state["errors"] = errors
+    finally:
+      with _prefetch_lock:
+        kind = str(task.get("kind", "other") or "other")
+        _prefetch_pending_keys.discard(key)
+        _prefetch_completed_keys.add(key)
+        _prefetch_state["completed"] = int(_prefetch_state.get("completed", 0) or 0) + 1
+        completed_by_kind = dict(_prefetch_state.get("completed_by_kind", {}) or {})
+        completed_by_kind[kind] = int(completed_by_kind.get(kind, 0) or 0) + 1
+        _prefetch_state["completed_by_kind"] = completed_by_kind
+        _prefetch_state["updated_at"] = time.time()
+
+
+def _ensure_prefetch_running(*, force_refresh: bool = False) -> None:
+  global _prefetch_thread
+  patch = riot.get_latest_patch(force_refresh=force_refresh)
+  marker = _load_prefetch_marker(patch)
+  with _prefetch_lock:
+    if marker.get("complete") and not force_refresh and not _prefetch_state.get("running"):
+      _prefetch_state.update(
+        {
+          "running": False,
+          "patch": patch,
+          "started_at": float(marker.get("started_at", 0.0) or 0.0),
+          "updated_at": float(marker.get("completed_at", 0.0) or time.time()),
+          "completed_at": float(marker.get("completed_at", 0.0) or time.time()),
+          "total": int(marker.get("total", 0) or 0),
+          "completed": int(marker.get("total", 0) or 0),
+          "failed": int(marker.get("failed", 0) or 0),
+          "current": None,
+          "current_label": "Patch cache ready",
+          "queue_size": 0,
+          "ready": True,
+          "totals_by_kind": dict(marker.get("totals_by_kind", {}) or {}),
+          "completed_by_kind": dict(marker.get("totals_by_kind", {}) or {}),
+        }
+      )
+      return
+    if _prefetch_state.get("running") and _prefetch_state.get("patch") == patch:
+      return
+    if _prefetch_thread is not None and _prefetch_thread.is_alive():
+      return
+    _prefetch_thread = Thread(target=_run_prefetch_cycle, kwargs={"patch": patch, "force_refresh": force_refresh}, daemon=True)
+    _prefetch_thread.start()
+
+
+def _prioritize_prefetch_for_champion(
+  champion: str,
+  role: str = "jungle",
+  tier: str = "emerald_plus",
+  region: str = "global",
+  patch: Optional[str] = None,
+) -> None:
+  champion_name = str(champion or "").strip()
+  if not champion_name:
+    return
+  resolved_patch = str(patch or riot.get_latest_patch(force_refresh=False) or "live")
+  _ensure_prefetch_running(force_refresh=False)
+  with _prefetch_lock:
+    _prefetch_state["priority_champion"] = champion_name
+  _enqueue_prefetch_task(
+    {"kind": "meta", "patch": resolved_patch, "champion": champion_name, "role": role, "tier": tier, "region": region},
+    front=True,
+  )
+  _enqueue_prefetch_task(
+    {"kind": "scaling", "patch": resolved_patch, "champion": champion_name},
+    front=True,
+  )
+
+
+def _schedule_meta_snapshot_prewarm(champion: str, role: str, tier: str, region: str, patch: str) -> None:
+  key = _meta_snapshot_key(champion, role, tier, region, patch)
+  now = time.time()
+  with _meta_snapshot_lock:
+    if key in _meta_snapshot_running:
+      return
+    _meta_snapshot_running[key] = now
+
+  def _worker() -> None:
+    started_at = time.time()
+    try:
+      result = prewarm_meta_snapshot(
+        champion=champion,
+        role=role,
+        tier=tier,
+        region=region,
+        patch=patch,
+      )
+      with _meta_snapshot_lock:
+        _meta_snapshot_recent[key] = {
+          "key": key,
+          "started_at": started_at,
+          "finished_at": time.time(),
+          "ok": bool(result.get("ok")),
+          "result": result,
+        }
+    except Exception as exc:
+      with _meta_snapshot_lock:
+        _meta_snapshot_recent[key] = {
+          "key": key,
+          "started_at": started_at,
+          "finished_at": time.time(),
+          "ok": False,
+          "error": str(exc),
+        }
+    finally:
+      with _meta_snapshot_lock:
+        _meta_snapshot_running.pop(key, None)
+
+  Thread(target=_worker, daemon=True).start()
 
 
 def _rune_choice_from_name(name: str, tree: str, slot: str) -> RuneChoice:
@@ -497,10 +915,20 @@ def _load_rune_catalog(force: bool = False) -> Dict[str, Any]:
 
 def _rune_catalog_response() -> Dict[str, Any]:
   catalog = _load_rune_catalog()
+  # Annotate each shard row with its slot label so the UI can show it clearly.
+  _SHARD_SLOT_LABELS = ["Offense", "Flex", "Defense"]
+  shards_labeled = [
+    {
+      "slot": _SHARD_SLOT_LABELS[i] if i < len(_SHARD_SLOT_LABELS) else f"Slot {i+1}",
+      "options": row,
+    }
+    for i, row in enumerate(_DEFAULT_SHARD_OPTIONS)
+  ]
   return {
     "version": str(catalog.get("version", "") or ""),
     "styles": list(catalog.get("styles", [])),
     "shards": list(_DEFAULT_SHARD_OPTIONS),
+    "shards_labeled": shards_labeled,
   }
 
 
@@ -738,7 +1166,6 @@ def _run_optimization(
     items = riot.get_items(patch, force_refresh=force_refresh)
     _step(f"Fetched patch {patch} - {len(items)} items available", 0.20)
     _step(f"Champion profile: {champion} [{', '.join(profile.champion_tags)}]", 0.26)
-
     saved_overrides: Dict[str, Dict[str, float]] = {}
     _scaling_warn = ""
     try:
@@ -847,7 +1274,10 @@ def _run_optimization(
     _emit(f"Running {settings.mode} search", 0.60)
     ranked, pareto, checkpoints = optimizer_obj.optimize(weights, settings, constraints=constraints, enemy=enemy)
     search_ms = round((time.perf_counter() - t_search) * 1000)
-    _step(f"{settings.mode} search - {len(ranked)} builds scored ({search_ms} ms)", 0.91)
+    _step(f"{settings.mode} search complete — {len(ranked)} builds scored ({search_ms} ms)", 0.91)
+
+    if ranked:
+      _step(f"Top build score: {ranked[0].weighted_score:.1f} — comparing to meta builds", 0.94)
 
     meta_compare = {
       "source": "u.gg",
@@ -888,7 +1318,9 @@ def _run_optimization(
           optimizer_metrics=dict(top.metrics or {}),
           evaluate_meta_build_fn=_evaluate_meta_build,
           item_id_to_name=_item_id_map,
+          allow_persistent_snapshot=True,
         )
+        _step("Meta comparison complete", 0.97)
       except Exception as exc:
         meta_compare = {
           "source": "none",
@@ -925,6 +1357,12 @@ def _run_optimization(
     return response
 
 
+@app.get("/health")
+def health() -> Any:
+  """Health check endpoint for Container Apps."""
+  return _json_response({"status": "ok", "service": "mathematically-correct-builds"}), 200
+
+
 @app.get("/")
 def index() -> str:
   return render_template("index.html")
@@ -934,7 +1372,15 @@ def index() -> str:
 def optimize() -> Any:
   payload = request.get_json(silent=True) or {}
   try:
-    result = _run_optimization(payload)
+    _prioritize_prefetch_for_champion(
+      champion=str(payload.get("champion", "") or "").strip(),
+      role=str(payload.get("role", "jungle") or "jungle"),
+      tier=str(payload.get("meta_tier", "emerald_plus") or "emerald_plus"),
+      region=str(payload.get("meta_region", "global") or "global"),
+      patch=str(payload.get("meta_patch", "live") or "live"),
+    )
+    future = _get_optimize_executor().submit(_run_optimization, payload, None)
+    result = future.result()
     with _jobs_lock:
       _duration_history[_mode_history_key(payload)].append(float(result.get("total_seconds", 0.0)))
     return _json_response(result)
@@ -949,6 +1395,13 @@ def optimize() -> Any:
 @app.post("/optimize/start")
 def optimize_start() -> Any:
   payload = request.get_json(silent=True) or {}
+  _prioritize_prefetch_for_champion(
+    champion=str(payload.get("champion", "") or "").strip(),
+    role=str(payload.get("role", "jungle") or "jungle"),
+    tier=str(payload.get("meta_tier", "emerald_plus") or "emerald_plus"),
+    region=str(payload.get("meta_region", "global") or "global"),
+    patch=str(payload.get("meta_patch", "live") or "live"),
+  )
   estimated_seconds = _estimate_runtime_seconds(payload)
   job_id = uuid4().hex
   now = time.time()
@@ -975,8 +1428,27 @@ def optimize_start() -> Any:
         job["phase"] = label
         job["updated_at"] = time.time()
 
+    future: Optional[Future] = None
     try:
-      result = _run_optimization(payload, progress_cb=_progress)
+      with _jobs_lock:
+        job = _optimize_jobs.get(job_id)
+        if job:
+          job["phase"] = "Running optimization in worker process"
+          job["updated_at"] = time.time()
+      future = _get_optimize_executor().submit(_run_optimization, payload, None)
+      while future is not None and not future.done():
+        with _jobs_lock:
+          job = _optimize_jobs.get(job_id)
+          if job and job.get("status") == "running":
+            elapsed = max(0.0, time.time() - float(job.get("created_at", time.time())))
+            est = max(0.5, float(job.get("estimated_seconds", 1.0) or 1.0))
+            projected = min(0.92, max(float(job.get("progress", 0.01) or 0.01), elapsed / est * 0.9))
+            job["progress"] = projected
+            job["phase"] = "Running optimization in worker process"
+            job["updated_at"] = time.time()
+        time.sleep(0.25)
+
+      result = future.result() if future is not None else _run_optimization(payload, progress_cb=_progress)
       elapsed = float(result.get("total_seconds", 0.0))
       with _jobs_lock:
         _duration_history[_mode_history_key(payload)].append(elapsed)
@@ -1096,6 +1568,7 @@ def api_champion_scaling() -> Any:
     if not champion:
         return jsonify({"error": "champion is required"}), 400
     force_refresh = str(request.args.get("force_refresh", "false")).lower() in {"1", "true", "yes", "on"}
+    _prioritize_prefetch_for_champion(champion=champion, patch=riot.get_latest_patch(force_refresh=False))
 
     try:
         scaling = wiki.get_scaling(champion, force_refresh=force_refresh, use_ai_fallback=False)
@@ -1277,10 +1750,13 @@ def _background_patch_sweep_loop(poll_seconds: int = 900) -> None:
     try:
       fingerprint = wiki._get_patch_fingerprint(force_refresh=True)
       should_run = False
+      patch = riot.get_latest_patch(force_refresh=False)
+      marker = _load_prefetch_marker(patch)
 
       with _sweep_lock:
         if not _sweep_state.get("last_patch_fingerprint"):
           _sweep_state["last_patch_fingerprint"] = fingerprint
+          should_run = not bool(marker.get("complete"))
         elif fingerprint != _sweep_state.get("last_patch_fingerprint") and not _sweep_state.get("running"):
           _sweep_state["running"] = True
           _sweep_state["last_patch_fingerprint"] = fingerprint
@@ -1293,6 +1769,7 @@ def _background_patch_sweep_loop(poll_seconds: int = 900) -> None:
         try:
           cache.clear()
           report = _compute_champion_scaling_sweep(force_refresh=True, limit=0)
+          _ensure_prefetch_running(force_refresh=True)
         except Exception as exc:
           error_text = str(exc)
         with _sweep_lock:
@@ -1304,6 +1781,12 @@ def _background_patch_sweep_loop(poll_seconds: int = 900) -> None:
       with _sweep_lock:
         _sweep_state["last_error"] = str(exc)
         _sweep_state["running"] = False
+
+    try:
+      _ensure_prefetch_running(force_refresh=False)
+    except Exception as exc:
+      with _prefetch_lock:
+        _prefetch_state["last_error"] = str(exc)
 
     time.sleep(max(60, int(poll_seconds)))
 
@@ -1342,6 +1825,45 @@ def api_champion_scaling_sweep_status() -> Any:
                 "last_report": _sweep_state.get("last_report"),
             }
         )
+
+
+@app.get("/api/meta-snapshot-status")
+def api_meta_snapshot_status() -> Any:
+  with _meta_snapshot_lock:
+    running = [{"key": key, "started_at": started} for key, started in _meta_snapshot_running.items()]
+    recent = sorted(
+      list(_meta_snapshot_recent.values()),
+      key=lambda x: float(x.get("finished_at", x.get("started_at", 0.0)) or 0.0),
+      reverse=True,
+    )[:30]
+  return _json_response(
+    {
+      "running": running,
+      "running_count": len(running),
+      "recent": recent,
+      "recent_count": len(recent),
+    }
+  )
+
+
+@app.get("/api/prefetch-status")
+def api_prefetch_status() -> Any:
+  _ensure_prefetch_running(force_refresh=False)
+  return _json_response(_prefetch_progress_payload())
+
+
+@app.post("/api/prefetch-priority")
+def api_prefetch_priority() -> Any:
+  payload = request.get_json(silent=True) or {}
+  champion = str(payload.get("champion", "") or "").strip()
+  if not champion:
+    return jsonify({"error": "champion is required"}), 400
+  role = str(payload.get("role", "jungle") or "jungle")
+  tier = str(payload.get("tier", "emerald_plus") or "emerald_plus")
+  region = str(payload.get("region", "global") or "global")
+  patch = str(payload.get("patch", "live") or "live")
+  _prioritize_prefetch_for_champion(champion=champion, role=role, tier=tier, region=region, patch=patch)
+  return _json_response({"ok": True, "state": _prefetch_progress_payload()})
 
 
 @app.get("/api/unknown-op-sweep")
@@ -1432,6 +1954,7 @@ def api_unknown_op_sweep() -> Any:
             optimizer_metrics=dict(best.metrics or {}),
             evaluate_meta_build_fn=_evaluate_meta_build,
             item_id_to_name=_item_id_map,
+            allow_persistent_snapshot=True,
           )
           if not comparison.get("available"):
             continue
@@ -1513,6 +2036,35 @@ def api_icon_rune(rune_token: str) -> Any:
             return jsonify({"error": "icon not found"}), 404
         cache_token = _safe_token(token.lower().replace(" ", "_")) or "rune"
         icon_path = _cache_icon_from_wiki(remote_url, "rune", cache_token)
+        return send_file(icon_path, mimetype="image/png", max_age=60 * 60 * 24 * 30)
+    except Exception:
+        return jsonify({"error": "icon not found"}), 404
+
+
+# Map stat shard IDs to their DDragon StatMods image filenames.
+_SHARD_ID_TO_DDRAGON_FILE: Dict[str, str] = {
+    "5001": "StatModsHealthScalingIcon.png",
+    "5002": "StatModsArmorIcon.png",
+    "5003": "StatModsMagicResIcon.MagicResist.png",
+    "5005": "StatModsAttackSpeedIcon.png",
+    "5007": "StatModsCDRScalingIcon.png",
+    "5008": "StatModsAdaptiveForceIcon.png",
+    "5011": "StatModsHealthPlusIcon.png",
+    "5013": "StatModsTenacityIcon.Tenacity.png",
+}
+
+
+@app.get("/api/icon/shard/<path:shard_id>")
+def api_icon_shard(shard_id: str) -> Any:
+    normalized = str(shard_id or "").strip().rstrip(".png").lower()
+    # Strip any trailing .png extension from the route token
+    clean_id = re.sub(r"\.png$", "", normalized)
+    ddragon_file = _SHARD_ID_TO_DDRAGON_FILE.get(clean_id)
+    if not ddragon_file:
+        return jsonify({"error": "shard not found"}), 404
+    try:
+        remote_url = f"https://ddragon.leagueoflegends.com/cdn/img/perk-images/StatMods/{ddragon_file}"
+        icon_path = _cache_remote_asset(remote_url, "shard", f"shard_{clean_id}", ".png")
         return send_file(icon_path, mimetype="image/png", max_age=60 * 60 * 24 * 30)
     except Exception:
         return jsonify({"error": "icon not found"}), 404
@@ -1717,12 +2269,20 @@ def serialize_build(build: Any, patch: str = "") -> Dict[str, Any]:
   rune_page = getattr(build, "rune_page", None)
   rune_payload: Dict[str, Any] = {}
   if rune_page is not None:
+    raw_shards = list(getattr(rune_page, "shards", ()) or ())
+    # Shard slots are always: [0]=Offense, [1]=Flex, [2]=Defense
+    _SHARD_SLOT_LABELS = ["Offense", "Flex", "Defense"]
+    shards_labeled = [
+      {"slot": _SHARD_SLOT_LABELS[i] if i < len(_SHARD_SLOT_LABELS) else f"Slot {i+1}", "name": str(s)}
+      for i, s in enumerate(raw_shards)
+    ]
     rune_payload = {
       "id": getattr(rune_page, "page_id", ""),
       "name": getattr(rune_page, "name", ""),
       "primary_tree": getattr(rune_page, "primary_tree", ""),
       "secondary_tree": getattr(rune_page, "secondary_tree", ""),
-      "shards": list(getattr(rune_page, "shards", ()) or ()),
+      "shards": raw_shards,
+      "shards_labeled": shards_labeled,
       "runes": [
         {
           "id": getattr(x, "rune_id", ""),
@@ -1750,11 +2310,13 @@ def serialize_build(build: Any, patch: str = "") -> Dict[str, Any]:
 
 if __name__ == "__main__":
   debug_mode = os.environ.get("FLASK_ENV", "development").lower() != "production"
+  port = int(os.environ.get("PORT", 5055))
   if (not debug_mode) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true"):
+    _ensure_prefetch_running(force_refresh=False)
     Thread(target=_background_patch_sweep_loop, daemon=True).start()
   if debug_mode:
-    app.run(host="127.0.0.1", port=5055, debug=True)
+    app.run(host="127.0.0.1", port=port, debug=True)
   else:
     from waitress import serve
-    serve(app, host="0.0.0.0", port=5055, threads=4)
+    serve(app, host="0.0.0.0", port=port, threads=4)
 
