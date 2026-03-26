@@ -38,6 +38,7 @@ from data_sources import (
 from meta_build_comparison import compare_optimizer_build_to_ugg, extract_live_rune_pages, prewarm_meta_snapshot, _safe_float as _safe_float
 from optimizer import BuildConstraints, BuildOptimizer, EnemyProfile, ItemStats, ObjectiveWeights, RuneChoice, RunePage, SearchSettings
 import simulation as sim_engine
+from meta_build_updater import update_meta_builds_periodically, get_last_meta_build_update_report
 
 
 app = Flask(__name__)
@@ -150,6 +151,9 @@ _DEFAULT_SHARD_OPTIONS: List[List[Dict[str, str]]] = [
 _jobs_lock = Lock()
 _optimize_jobs: Dict[str, Dict[str, Any]] = {}
 _duration_history: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=10))
+_meta_build_refresh_lock = Lock()
+_meta_build_refresh_jobs: Dict[str, Dict[str, Any]] = {}
+_meta_build_refresh_latest_job_id: str = ""
 _sweep_lock = Lock()
 _sweep_state: Dict[str, Any] = {
   "running": False,
@@ -1290,7 +1294,7 @@ def _run_optimization(
       try:
         def _evaluate_meta_build(item_names: List[str]) -> Dict[str, Any]:
           resolved = _resolve_item_names_to_stats(item_names, items)
-          if len(resolved) < 3:
+          if len(resolved) < 1:
             return {"weighted_score": 0.0, "metrics": {}}
           evaluated = optimizer_obj._evaluate_best_order(
             resolved,
@@ -1559,6 +1563,117 @@ def refresh_data() -> Any:
         )
     except Exception as exc:
         return jsonify({"error": f"Failed to refresh cache: {exc}"}), 500
+
+
+@app.post("/api/meta-builds/refresh")
+def refresh_meta_builds() -> Any:
+    """Trigger a manual meta-build fixture refresh.
+
+    Body:
+      async: bool (default true) - when true, refresh runs in a background thread.
+    """
+    def _start_meta_refresh_job() -> str:
+      job_id = str(uuid4())
+      now = time.time()
+      with _meta_build_refresh_lock:
+        _meta_build_refresh_jobs[job_id] = {
+          "job_id": job_id,
+          "status": "running",
+          "created_at": now,
+          "updated_at": now,
+          "completed_at": 0.0,
+          "error": "",
+        }
+        global _meta_build_refresh_latest_job_id
+        _meta_build_refresh_latest_job_id = job_id
+      return job_id
+
+    def _run_meta_refresh_job(job_id: str) -> None:
+      try:
+        update_meta_builds_periodically()
+        with _meta_build_refresh_lock:
+          job = _meta_build_refresh_jobs.get(job_id)
+          if job is not None:
+            job["status"] = "complete"
+            job["updated_at"] = time.time()
+            job["completed_at"] = time.time()
+      except Exception as exc:
+        with _meta_build_refresh_lock:
+          job = _meta_build_refresh_jobs.get(job_id)
+          if job is not None:
+            job["status"] = "error"
+            job["error"] = str(exc)
+            job["updated_at"] = time.time()
+            job["completed_at"] = time.time()
+
+    payload = request.get_json(silent=True) or {}
+    run_async = bool(payload.get("async", True))
+
+    job_id = _start_meta_refresh_job()
+
+    if run_async:
+      Thread(target=_run_meta_refresh_job, args=(job_id,), daemon=True).start()
+      return jsonify({
+        "ok": True,
+        "started": True,
+        "job_id": job_id,
+        "mode": "async",
+        "message": "Meta build refresh started in background",
+      })
+
+    try:
+      _run_meta_refresh_job(job_id)
+      return jsonify({
+        "ok": True,
+        "started": False,
+        "job_id": job_id,
+        "mode": "sync",
+        "message": "Meta build refresh completed",
+      })
+    except Exception as exc:
+      return jsonify({"error": f"Meta build refresh failed: {exc}"}), 500
+
+
+@app.get("/api/meta-builds/refresh-status")
+def refresh_meta_builds_status() -> Any:
+    requested_job_id = str(request.args.get("job_id", "")).strip()
+    with _meta_build_refresh_lock:
+      job_id = requested_job_id or _meta_build_refresh_latest_job_id
+      job = dict(_meta_build_refresh_jobs.get(job_id, {})) if job_id else {}
+
+    if not job_id or not job:
+      return jsonify({"ok": False, "error": "No meta build refresh job found"}), 404
+
+    now = time.time()
+    created_at = float(job.get("created_at", now))
+    updated_at = float(job.get("updated_at", created_at))
+    completed_at = float(job.get("completed_at", 0.0))
+
+    return jsonify({
+      "ok": True,
+      "job_id": job_id,
+      "status": job.get("status", "running"),
+      "created_at": created_at,
+      "updated_at": updated_at,
+      "completed_at": completed_at,
+      "elapsed_seconds": round(max(0.0, now - created_at), 2),
+      "error": job.get("error", ""),
+    })
+
+
+@app.get("/api/meta-builds/updater-health")
+def meta_builds_updater_health() -> Any:
+    """Return the latest updater run report and latest refresh job snapshot."""
+    with _meta_build_refresh_lock:
+      latest_job_id = _meta_build_refresh_latest_job_id
+      latest_job = dict(_meta_build_refresh_jobs.get(latest_job_id, {})) if latest_job_id else {}
+
+    return jsonify({
+      "ok": True,
+      "latest_job_id": latest_job_id,
+      "latest_job": latest_job,
+      "last_run_report": get_last_meta_build_update_report(),
+    })
 
 
 @app.get("/api/champion-scaling")
@@ -2314,6 +2429,8 @@ if __name__ == "__main__":
   if (not debug_mode) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true"):
     _ensure_prefetch_running(force_refresh=False)
     Thread(target=_background_patch_sweep_loop, daemon=True).start()
+    # Auto-update meta builds on startup
+    Thread(target=update_meta_builds_periodically, daemon=True).start()
   if debug_mode:
     app.run(host="127.0.0.1", port=port, debug=True)
   else:

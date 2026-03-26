@@ -1527,6 +1527,37 @@ function formatMetaComparison(meta) {
       const delta = `${deltaRaw >= 0 ? '+' : ''}${deltaRaw.toFixed(2)}`;
       const align = Number(row.component_alignment || 0).toFixed(3);
       const runeHtml = runePageHtml(row.rune_page || {});
+      const stageRows = Array.isArray(row.stage_breakdown) ? row.stage_breakdown : [];
+      const stageHtml = stageRows.length
+        ? `<div class="build-metrics" style="margin-top:8px;">
+            <div style="font-size:0.75rem;letter-spacing:0.04em;text-transform:uppercase;color:#9ebad0;margin-bottom:0.25rem;">1-6 Item Stage Comparison</div>
+            <div style="display:grid;gap:0.22rem;">
+              ${stageRows.map((st) => {
+                const s = Number(st && st.stage || 0);
+                const od = Number(st && st.optimizer && st.optimizer.metrics && st.optimizer.metrics.damage || 0);
+                const md = Number(st && st.meta && st.meta.metrics && st.meta.metrics.damage || 0);
+                const oh = Number(st && st.optimizer && st.optimizer.metrics && st.optimizer.metrics.healing || 0);
+                const mh = Number(st && st.meta && st.meta.metrics && st.meta.metrics.healing || 0);
+                const ot = Number(st && st.optimizer && st.optimizer.metrics && st.optimizer.metrics.tankiness || 0);
+                const mt = Number(st && st.meta && st.meta.metrics && st.meta.metrics.tankiness || 0);
+                const ol = Number(st && st.optimizer && st.optimizer.metrics && st.optimizer.metrics.lifesteal || 0);
+                const ml = Number(st && st.meta && st.meta.metrics && st.meta.metrics.lifesteal || 0);
+                const dScore = Number(st && st.delta && st.delta.weighted_score || 0);
+                const dCls = dScore >= 0 ? 'smoke-ok' : 'smoke-fail';
+                return `<div style="display:grid;grid-template-columns:62px 1fr;gap:0.45rem;padding:0.28rem 0.38rem;border:1px solid rgba(83,108,126,0.45);border-radius:8px;background:rgba(13,24,35,0.68);">
+                  <div style="font-size:0.74rem;color:#9ebad0;">${s} item${s === 1 ? '' : 's'}</div>
+                  <div style="font-size:0.74rem;color:#cfe2f1;display:flex;flex-wrap:wrap;gap:0.5rem;">
+                    <span>dmg <b>${Math.round(od)}</b> vs <b>${Math.round(md)}</b></span>
+                    <span>heal <b>${Math.round(oh)}</b> vs <b>${Math.round(mh)}</b></span>
+                    <span>tank <b>${Math.round(ot)}</b> vs <b>${Math.round(mt)}</b></span>
+                    <span>ls <b>${ol.toFixed(2)}</b> vs <b>${ml.toFixed(2)}</b></span>
+                    <span class="${dCls}">score delta <b>${dScore >= 0 ? '+' : ''}${dScore.toFixed(1)}</b></span>
+                  </div>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>`
+        : '';
       return `<div class="build-card compare-card ${modeClass}${idx < 3 ? ' top-rank' : ''}">
         <div class="compare-card-head">
           <h4>#${idx + 1} ${escHtml(row.label || 'meta')}</h4>
@@ -1542,6 +1573,7 @@ function formatMetaComparison(meta) {
         </div>
         ${runeHtml}
         <div class="build-metrics compare-item-chip-row" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">${items.length ? items.map(x => `<span class="ability-chip" style="font-size:0.74rem;">${escHtml(x)}</span>`).join(' ') : '<span class="muted">No parsed items.</span>'}</div>
+        ${stageHtml}
       </div>`;
     }).join('');
 

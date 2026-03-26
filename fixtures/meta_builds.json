@@ -1,16 +1,503 @@
 {
-  "_comment": "Curated meta builds by champion/role. Update item names here when the meta shifts. Keys use lowercase champion name + role slug.",
   "version": "16.6",
-  "last_updated": "2026-03-25",
+  "last_updated": "2026-03-26T13:48:40.548376",
+  "_comment": "Automatically synced meta builds from live U.GG SSR data.",
   "builds": {
+    "aatrox/jungle": {
+      "items": [
+        [
+          "Hubris",
+          "Sundered Sky",
+          "Plated Steelcaps",
+          "Death's Dance",
+          "Serylda's Grudge",
+          "Endless Hunger"
+        ],
+        [
+          "Hubris",
+          "Sundered Sky",
+          "Plated Steelcaps",
+          "Death's Dance",
+          "Maw of Malmortius",
+          "Endless Hunger"
+        ],
+        [
+          "Hubris",
+          "Mercury's Treads",
+          "Sundered Sky",
+          "Spirit Visage",
+          "Abyssal Mask"
+        ],
+        [
+          "Hubris",
+          "Voltaic Cyclosword",
+          "Plated Steelcaps",
+          "Serpent's Fang",
+          "Serylda's Grudge",
+          "Death's Dance"
+        ],
+        [
+          "Voltaic Cyclosword",
+          "Immortal Shieldbow",
+          "Fiendhunter Bolts",
+          "The Collector",
+          "Lord Dominik's Regards",
+          "Infinity Edge"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
     "briar/jungle": {
       "items": [
-        ["Scorchclaw Pup", "The Collector", "Profane Hydra", "Mercury's Treads"],
-        ["Scorchclaw Pup", "Sundered Sky", "Black Cleaver", "Plated Steelcaps"]
+        [
+          "Blade of The Ruined King",
+          "Black Cleaver",
+          "Mercury's Treads",
+          "Death's Dance",
+          "Spirit Visage",
+          "Endless Hunger"
+        ],
+        [
+          "The Collector",
+          "Profane Hydra",
+          "Edge of Night",
+          "Lord Dominik's Regards",
+          "Death's Dance",
+          "Infinity Edge"
+        ],
+        [
+          "The Collector",
+          "Titanic Hydra",
+          "Lord Dominik's Regards",
+          "Infinity Edge",
+          "Death's Dance",
+          "Immortal Shieldbow"
+        ],
+        [
+          "Kraken Slayer",
+          "Plated Steelcaps",
+          "Blade of The Ruined King",
+          "Titanic Hydra",
+          "Death's Dance",
+          "Spirit Visage"
+        ],
+        [
+          "Blade of The Ruined King",
+          "Plated Steelcaps",
+          "Black Cleaver",
+          "Spirit Visage",
+          "Randuin's Omen",
+          "Thornmail"
+        ],
+        [
+          "Blade of The Ruined King",
+          "Sorcerer's Shoes",
+          "Rylai's Crystal Scepter",
+          "Zhonya's Hourglass"
+        ]
       ],
-      "win_rate": 0.53,
-      "pick_rate": 0.05,
-      "source_note": "U.GG Emerald+ patch 16.6"
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "elise/jungle": {
+      "items": [
+        [
+          "Sorcerer's Shoes",
+          "Stormsurge",
+          "Shadowflame",
+          "Rabadon's Deathcap",
+          "Zhonya's Hourglass",
+          "Mejai's Soulstealer"
+        ],
+        [
+          "Sorcerer's Shoes",
+          "Stormsurge",
+          "Mejai's Soulstealer",
+          "Rabadon's Deathcap",
+          "Zhonya's Hourglass",
+          "Void Staff"
+        ],
+        [
+          "Dusk and Dawn",
+          "Sorcerer's Shoes",
+          "Bloodletter's Curse",
+          "Zhonya's Hourglass",
+          "Thornmail",
+          "Wit's End"
+        ],
+        [
+          "Stormsurge",
+          "Shadowflame",
+          "Mercury's Treads",
+          "Kaenic Rookern",
+          "Jak'Sho, The Protean",
+          "Wit's End"
+        ],
+        [
+          "Sorcerer's Shoes",
+          "Dusk and Dawn",
+          "Shadowflame",
+          "Nashor's Tooth",
+          "Blade of The Ruined King"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "khazix/jungle": {
+      "items": [
+        [
+          "Umbral Glaive",
+          "Bastionbreaker",
+          "Ionian Boots of Lucidity",
+          "Edge of Night",
+          "Serylda's Grudge",
+          "Opportunity"
+        ],
+        [
+          "Umbral Glaive",
+          "Bastionbreaker",
+          "Ionian Boots of Lucidity",
+          "Maw of Malmortius",
+          "Death's Dance",
+          "Endless Hunger"
+        ],
+        [
+          "Hubris",
+          "Black Cleaver",
+          "Zeke's Convergence",
+          "Serylda's Grudge",
+          "Frozen Heart",
+          "Force of Nature"
+        ],
+        [
+          "Hubris",
+          "Ionian Boots of Lucidity",
+          "The Collector",
+          "Mortal Reminder",
+          "Lord Dominik's Regards",
+          "Kraken Slayer"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "leesin/jungle": {
+      "items": [
+        [
+          "Eclipse",
+          "Sundered Sky",
+          "Mercury's Treads",
+          "Death's Dance",
+          "Sterak's Gage",
+          "Black Cleaver"
+        ],
+        [
+          "Eclipse",
+          "Plated Steelcaps",
+          "Black Cleaver",
+          "Spirit Visage",
+          "Randuin's Omen",
+          "Dead Man's Plate"
+        ],
+        [
+          "Hubris",
+          "Profane Hydra",
+          "Edge of Night",
+          "Axiom Arc",
+          "Serylda's Grudge",
+          "Lord Dominik's Regards"
+        ],
+        [
+          "The Collector",
+          "Ionian Boots of Lucidity",
+          "Lord Dominik's Regards",
+          "Infinity Edge",
+          "Mortal Reminder",
+          "Immortal Shieldbow"
+        ],
+        [
+          "Eclipse",
+          "Sundered Sky",
+          "Mercury's Treads",
+          "Black Cleaver",
+          "Blade of The Ruined King",
+          "Trinity Force"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "aatrox/top": {
+      "items": [
+        [
+          "Plated Steelcaps",
+          "Spear of Shojin",
+          "Voltaic Cyclosword",
+          "Death's Dance",
+          "Sterak's Gage",
+          "Endless Hunger"
+        ],
+        [
+          "Iceborn Gauntlet",
+          "Plated Steelcaps",
+          "Sundered Sky",
+          "Randuin's Omen",
+          "Spirit Visage",
+          "Force of Nature"
+        ],
+        [
+          "Profane Hydra",
+          "Edge of Night",
+          "Serylda's Grudge",
+          "Voltaic Cyclosword",
+          "Sundered Sky",
+          "Hubris"
+        ],
+        [
+          "Voltaic Cyclosword",
+          "Lord Dominik's Regards",
+          "Fiendhunter Bolts",
+          "Immortal Shieldbow",
+          "Infinity Edge",
+          "Stormrazor"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "viego/jungle": {
+      "items": [
+        [
+          "Kraken Slayer",
+          "The Collector",
+          "Immortal Shieldbow",
+          "Lord Dominik's Regards",
+          "Infinity Edge",
+          "Death's Dance"
+        ],
+        [
+          "Kraken Slayer",
+          "The Collector",
+          "Immortal Shieldbow",
+          "Lord Dominik's Regards",
+          "Death's Dance",
+          "Wit's End"
+        ],
+        [
+          "Kraken Slayer",
+          "The Collector",
+          "Immortal Shieldbow",
+          "Lord Dominik's Regards",
+          "Infinity Edge",
+          "Mortal Reminder"
+        ],
+        [
+          "Kraken Slayer",
+          "The Collector",
+          "Mercury's Treads",
+          "Wit's End",
+          "Kaenic Rookern",
+          "Jak'Sho, The Protean"
+        ],
+        [
+          "Kraken Slayer",
+          "The Collector",
+          "Serpent's Fang",
+          "Immortal Shieldbow",
+          "Infinity Edge",
+          "Lord Dominik's Regards"
+        ],
+        [
+          "Kraken Slayer",
+          "Mercury's Treads",
+          "Blade of The Ruined King",
+          "The Collector",
+          "Wit's End",
+          "Death's Dance"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "nidalee/jungle": {
+      "items": [
+        [
+          "Lich Bane",
+          "Sorcerer's Shoes",
+          "Mejai's Soulstealer",
+          "Zhonya's Hourglass",
+          "Rabadon's Deathcap",
+          "Void Staff"
+        ],
+        [
+          "Iceborn Gauntlet",
+          "Mercury's Treads",
+          "Bandlepipes",
+          "Echoes of Helia",
+          "Randuin's Omen",
+          "Jak'Sho, The Protean"
+        ],
+        [
+          "Iceborn Gauntlet",
+          "Plated Steelcaps",
+          "Bandlepipes",
+          "Echoes of Helia",
+          "Ardent Censer"
+        ],
+        [
+          "Lich Bane",
+          "Sorcerer's Shoes",
+          "Hextech Rocketbelt",
+          "Kraken Slayer",
+          "Runaan's Hurricane"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "masteryi/jungle": {
+      "items": [
+        [
+          "Kraken Slayer",
+          "Guinsoo's Rageblade",
+          "Experimental Hexplate",
+          "Blade of The Ruined King",
+          "Death's Dance",
+          "Wit's End"
+        ],
+        [
+          "Kraken Slayer",
+          "Guinsoo's Rageblade",
+          "Experimental Hexplate",
+          "Death's Dance",
+          "Randuin's Omen",
+          "Mercurial Scimitar"
+        ],
+        [
+          "Profane Hydra",
+          "The Collector",
+          "Infinity Edge",
+          "Immortal Shieldbow",
+          "Lord Dominik's Regards",
+          "Fiendhunter Bolts"
+        ],
+        [
+          "Profane Hydra",
+          "The Collector",
+          "Infinity Edge",
+          "Opportunity",
+          "Lord Dominik's Regards",
+          "Death's Dance"
+        ],
+        [
+          "Kraken Slayer",
+          "Guinsoo's Rageblade",
+          "Wit's End",
+          "Randuin's Omen",
+          "Kaenic Rookern",
+          "Jak'Sho, The Protean"
+        ],
+        [
+          "Kraken Slayer",
+          "Plated Steelcaps",
+          "Guinsoo's Rageblade",
+          "Nashor's Tooth",
+          "Riftmaker",
+          "Dusk and Dawn"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "diana/jungle": {
+      "items": [
+        [
+          "Dusk and Dawn",
+          "Sorcerer's Shoes",
+          "Riftmaker",
+          "Zhonya's Hourglass",
+          "Rabadon's Deathcap",
+          "Mejai's Soulstealer"
+        ],
+        [
+          "Dusk and Dawn",
+          "Sorcerer's Shoes",
+          "Riftmaker",
+          "Zhonya's Hourglass",
+          "Unending Despair"
+        ],
+        [
+          "Dusk and Dawn",
+          "Plated Steelcaps",
+          "Riftmaker",
+          "Unending Despair",
+          "Jak'Sho, The Protean",
+          "Locket of the Iron Solari"
+        ],
+        [
+          "Nashor's Tooth",
+          "Mercury's Treads",
+          "Dusk and Dawn",
+          "Wit's End",
+          "Morellonomicon",
+          "Lich Bane"
+        ],
+        [
+          "Dusk and Dawn",
+          "Sorcerer's Shoes",
+          "Riftmaker",
+          "Navori Flickerblade",
+          "Rapid Firecannon",
+          "Phantom Dancer"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
+    },
+    "volibear/jungle": {
+      "items": [
+        [
+          "Dusk and Dawn",
+          "Navori Flickerblade",
+          "Mercury's Treads",
+          "Spirit Visage",
+          "Thornmail",
+          "Jak'Sho, The Protean"
+        ],
+        [
+          "Dusk and Dawn",
+          "Plated Steelcaps",
+          "Navori Flickerblade",
+          "Spirit Visage",
+          "Dead Man's Plate",
+          "Sterak's Gage"
+        ],
+        [
+          "Dusk and Dawn",
+          "Mercury's Treads",
+          "Navori Flickerblade",
+          "Spirit Visage",
+          "Thornmail",
+          "Jak'Sho, The Protean"
+        ],
+        [
+          "Dusk and Dawn",
+          "Mercury's Treads",
+          "Nashor's Tooth",
+          "Riftmaker",
+          "Zhonya's Hourglass",
+          "Rabadon's Deathcap"
+        ],
+        [
+          "Dusk and Dawn",
+          "Mercury's Treads",
+          "Nashor's Tooth",
+          "Spirit Visage",
+          "Dead Man's Plate",
+          "Kraken Slayer"
+        ],
+        [
+          "Opportunity",
+          "Force of Nature",
+          "Ionian Boots of Lucidity",
+          "The Collector",
+          "Edge of Night",
+          "Lord Dominik's Regards"
+        ]
+      ],
+      "source_note": "Auto-fetched (u.gg SSR)"
     }
   }
 }

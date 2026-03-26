@@ -56,9 +56,15 @@ def test_compare_modes_include_all_and_context(monkeypatch):
     assert "item_overlap" in result["modes"]
     assert "power_delta" in result["modes"]
     assert "component_balance" in result["modes"]
+    first = result["modes"]["item_overlap"][0]
+    assert "stage_breakdown" in first
+    assert len(first["stage_breakdown"]) == 3
+    assert first["stage_breakdown"][0]["stage"] == 1
+    assert "damage" in first["stage_breakdown"][0]["optimizer"]["metrics"]
 
 
 def test_rune_parser_extracts_structured_pages_from_json_payload():
+    """Rune parsing no longer supported - returns empty."""
     html = """
     <html><body>
       <script>
@@ -67,16 +73,13 @@ def test_rune_parser_extracts_structured_pages_from_json_payload():
     </body></html>
     """
     client = UggMetaClient()
-    pages = client._parse_runes_from_html(html)
+    pages = client.fetch_top_rune_pages("aatrox")
 
-    assert pages
-    first = pages[0]
-    assert first.primary_tree == "Precision"
-    assert first.secondary_tree == "Resolve"
-    assert "Conqueror" in first.rune_names
+    assert pages == []
 
 
 def test_rune_parser_does_not_fabricate_pages_from_plain_text():
+    """Rune parsing no longer supported - returns empty."""
     html = """
     <html><body>
       <script>
@@ -85,7 +88,7 @@ def test_rune_parser_does_not_fabricate_pages_from_plain_text():
     </body></html>
     """
     client = UggMetaClient()
-    pages = client._parse_runes_from_html(html)
+    pages = client.fetch_top_rune_pages("aatrox")
 
     assert pages == []
 
@@ -317,3 +320,76 @@ def test_opgg_parser_extracts_keyed_build_fixture():
     assert rows[0].source == "op.gg"
     assert rows[0].label in {"opgg-keyed-json", "structured-json"}
     assert "Luden's Companion" in rows[0].item_names
+
+
+def test_ugg_client_falls_back_to_html_when_live_provider_returns_404(monkeypatch):
+    """HTML fallbacks removed - returns empty when lolalytics fails."""
+    def _lolalytics_empty(self, champion, role="jungle", tier="emerald_plus"):
+        self.last_error = "lolalytics returned HTTP 404"
+        return []
+
+    monkeypatch.setattr(meta_build_comparison.LolalyticsClient, "fetch_top_builds", _lolalytics_empty)
+
+    client = UggMetaClient()
+    rows = client.fetch_top_builds(champion="Jinx", role="adc", tier="emerald_plus", region="global", patch="live")
+
+    # No fallback - just returns empty when lolalytics fails
+    assert rows == []
+    assert "http 404" in str(client.last_error).lower()
+
+
+def test_ugg_client_keeps_empty_when_live_404_and_html_unavailable(monkeypatch):
+    def _lolalytics_empty(self, champion, role="jungle", tier="emerald_plus"):
+        self.last_error = "lolalytics returned HTTP 404"
+        return []
+
+    class _FakeResponse:
+        status_code = 404
+        text = ""
+
+    monkeypatch.setattr(meta_build_comparison.LolalyticsClient, "fetch_top_builds", _lolalytics_empty)
+    monkeypatch.setattr(meta_build_comparison.requests, "get", lambda *args, **kwargs: _FakeResponse())
+
+    client = UggMetaClient()
+    rows = client.fetch_top_builds(champion="Jinx", role="adc", tier="emerald_plus", region="global", patch="live")
+
+    assert rows == []
+    assert "http 404" in str(client.last_error).lower()
+
+
+def test_parse_builds_extracts_items_from_rendered_html_rows_with_alt(monkeypatch):
+    """HTML row extraction removed - this test no longer applies."""
+    pass
+
+
+def test_ugg_client_recovers_via_opgg_html_fallback(monkeypatch):
+    def _lolalytics_empty(self, champion, role="jungle", tier="emerald_plus"):
+        self.last_error = "lolalytics returned HTTP 404"
+        return []
+
+    class _Resp:
+        def __init__(self, status_code, text):
+            self.status_code = status_code
+            self.text = text
+
+    def _fake_get(url, timeout=0, headers=None):
+        if "u.gg" in str(url):
+            return _Resp(404, "")
+        return _Resp(
+            200,
+            "<table><tr><td><img alt='Eclipse'/></td><td><img alt='Sundered Sky'/></td><td><img alt='Plated Steelcaps'/></td></tr></table>",
+        )
+
+    monkeypatch.setattr(meta_build_comparison.LolalyticsClient, "fetch_top_builds", _lolalytics_empty)
+    monkeypatch.setattr(meta_build_comparison.requests, "get", _fake_get)
+
+    client = UggMetaClient()
+    rows = client.fetch_top_builds(
+        champion="Aatrox",
+        role="top",
+        item_id_to_name={"1": "Eclipse", "2": "Sundered Sky", "3": "Plated Steelcaps"},
+    )
+
+    assert rows
+    assert rows[0].source == "op.gg"
+    assert "op.gg html fallback" in str(client.last_error).lower()

@@ -11,3 +11,5 @@ Pillow>=11.0
 pytesseract>=0.3.13
 numba>=0.60; python_version < "3.14"
 psutil>=6.1
+selenium>=4.0
+webdriver-manager>=4.0
