@@ -43,9 +43,13 @@ Current UI features include:
 - Ranked build cards with icon tooltips and charted top-score comparison.
 - Parsed ability-scaling panel.
 - U.GG meta-comparison panel.
+- Live local runtime health badge with latency updates.
+- Meta snapshot status panel with refresh support.
 - Unknown-OP sweep panel.
 - Burst/DPS simulation controls and output cards.
 - Optional AI Build Suggester panel.
+- Local smoke-check tooling with JSON export and clipboard copy for diagnostics.
+- Persistent recent smoke-run history in Local Tools (stored in browser local storage).
 
 ## Install
 

@@ -18,7 +18,10 @@
         <div class="hero-title">Mathematically Correct Builds</div>
         <p class="hero-sub">Pick a champion, set a goal, and get a cleaner answer faster.</p>
         <span class="patch-pill" id="patchPill">Loading...</span>
-        <div id="runtimeNotice" class="runtime-notice muted">Checking OCR fallback support...</div>
+        <div class="runtime-stack">
+          <div id="runtimeNotice" class="runtime-notice muted">Checking OCR fallback support...</div>
+          <div id="localRuntimeStatus" class="runtime-notice runtime-local muted">Checking local runtime...</div>
+        </div>
       </div>
       <aside class="prefetch-indicator" id="prefetchIndicator" aria-live="polite">
         <div class="prefetch-label-row">
@@ -238,6 +241,30 @@
     </div>
   </div>
 
+  <div class="card local-tools-card">
+    <h3 style="margin-top:0;"><i data-lucide="activity"></i> Local Tools</h3>
+    <div class="button-row" style="margin-bottom:0.55rem;">
+      <button type="button" class="secondary" style="width:auto;" onclick="runLocalSmokeCheck()">
+        <i data-lucide="stethoscope" style="width:14px;height:14px;display:inline;margin-right:6px;"></i>Run Local Smoke Check
+      </button>
+      <button type="button" class="secondary" style="width:auto;" onclick="exportLocalSmokeCheck()">
+        <i data-lucide="download" style="width:14px;height:14px;display:inline;margin-right:6px;"></i>Export Diagnostics JSON
+      </button>
+      <button type="button" class="secondary" style="width:auto;" onclick="copyLocalSmokeCheck()">
+        <i data-lucide="copy" style="width:14px;height:14px;display:inline;margin-right:6px;"></i>Copy Diagnostics JSON
+      </button>
+      <button type="button" class="secondary" style="width:auto;" onclick="clearLocalSmokeHistory()">
+        <i data-lucide="eraser" style="width:14px;height:14px;display:inline;margin-right:6px;"></i>Clear Smoke History
+      </button>
+    </div>
+    <div id="localSmokeResult" class="muted">No smoke check run yet.</div>
+    <div id="localSmokeNote" class="local-tools-note">Run a smoke check to generate local diagnostics.</div>
+    <div class="local-tools-history-wrap">
+      <h4>Recent Smoke Runs</h4>
+      <div id="localSmokeHistory" class="local-tools-history muted">No local smoke history yet.</div>
+    </div>
+  </div>
+
   <!-- AI Suggest card -->
   <div class="card">
     <h3 style="margin-top:0;"><i data-lucide="bot"></i> AI Build Suggester <span class="muted" style="font-size:0.8rem;">(requires Ollama running locally)</span></h3>
@@ -307,6 +334,15 @@
     </div>
     
     <div class="tab-panel" id="tab-meta">
+      <div class="meta-snapshot-panel">
+        <div class="meta-snapshot-head">
+          <h4 style="margin:0;">Meta Snapshot Status</h4>
+          <button type="button" class="secondary" style="width:auto;" onclick="refreshMetaSnapshotStatus(true)">
+            <i data-lucide="refresh-cw" style="width:14px;height:14px;display:inline;margin-right:6px;"></i>Refresh
+          </button>
+        </div>
+        <div id="metaSnapshotStatus" class="muted">Loading local snapshot status...</div>
+      </div>
       <div id="metaComparison" class="muted">No run yet.</div>
     </div>
     

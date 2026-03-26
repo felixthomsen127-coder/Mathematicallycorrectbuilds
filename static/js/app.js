@@ -16,10 +16,15 @@ let splashThemeRequestId = 0;
 let lastMetaComparison = null;
 let lastBuildWarning = '';
 let prefetchStatusTimer = 0;
+let metaSnapshotTimer = 0;
+let localRuntimeTimer = 0;
+let lastLocalSmokeSnapshot = null;
+let localSmokeHistory = [];
 const BUILD_PRESET_STORAGE_KEY = 'mcb.buildPreset';
 const ENEMY_SCENARIO_STORAGE_KEY = 'mcb.enemyScenario';
 const CHAMPION_STORAGE_KEY = 'mcb.selectedChampion';
 const ROLE_STORAGE_KEY = 'mcb.selectedRole';
+const LOCAL_SMOKE_HISTORY_STORAGE_KEY = 'mcb.localSmokeHistory';
 
 // Champion picker
 async function loadChampions() {
@@ -78,6 +83,292 @@ function renderRuntimeNotice() {
   notice.textContent = ocr.available
     ? `OCR fallback ready: ${String(ocr.reason || 'available')}`
     : `OCR fallback inactive: ${String(ocr.reason || 'not available')}`;
+}
+
+async function runLocalSmokeCheck() {
+  const root = document.getElementById('localSmokeResult');
+  if (!root) return;
+  root.innerHTML = '<p class="muted thinking">Running local endpoint checks...</p>';
+  setLocalSmokeNote('Running diagnostics...', 'ok');
+
+  const checks = [
+    {
+      label: 'Health',
+      url: '/health',
+      parse: async (res) => {
+        const body = await res.json().catch(() => ({}));
+        return body && body.status ? `status=${body.status}` : 'ok';
+      },
+    },
+    {
+      label: 'Champions API',
+      url: '/api/champions',
+      parse: async (res) => {
+        const body = await res.json().catch(() => ({}));
+        const list = Array.isArray(body && body.champions) ? body.champions : [];
+        return `count=${list.length}`;
+      },
+    },
+    {
+      label: 'Prefetch Status',
+      url: '/api/prefetch-status',
+      parse: async (res) => {
+        const body = await res.json().catch(() => ({}));
+        const pct = Number(body && body.progress_percent || 0);
+        return `progress=${Math.round(pct)}%`;
+      },
+    },
+    {
+      label: 'Meta Snapshot Status',
+      url: '/api/meta-snapshot-status',
+      parse: async (res) => {
+        const body = await res.json().catch(() => ({}));
+        const running = Number(body && body.running_count || 0);
+        const recent = Number(body && body.recent_count || 0);
+        return `running=${running}, recent=${recent}`;
+      },
+    },
+  ];
+
+  const results = [];
+  for (const check of checks) {
+    const started = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 4500);
+      const res = await fetch(`${check.url}${check.url.includes('?') ? '&' : '?'}t=${Date.now()}`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      window.clearTimeout(timer);
+      const ended = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const latency = Math.max(1, Math.round(ended - started));
+      if (!res.ok) {
+        results.push({label: check.label, ok: false, detail: `HTTP ${res.status}`, latency});
+        continue;
+      }
+      const detail = await check.parse(res);
+      results.push({label: check.label, ok: true, detail, latency});
+    } catch (_) {
+      const ended = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const latency = Math.max(1, Math.round(ended - started));
+      results.push({label: check.label, ok: false, detail: 'request failed', latency});
+    }
+  }
+
+  const passed = results.filter((x) => x.ok).length;
+  const total = results.length;
+  const headClass = passed === total ? 'smoke-ok' : 'smoke-fail';
+  lastLocalSmokeSnapshot = {
+    generated_at: new Date().toISOString(),
+    summary: {
+      passed,
+      total,
+      healthy: passed === total,
+    },
+    checks: results.map((row) => ({
+      name: String(row.label || ''),
+      ok: Boolean(row.ok),
+      detail: String(row.detail || ''),
+      latency_ms: Number(row.latency || 0),
+    })),
+  };
+  prependLocalSmokeHistory(lastLocalSmokeSnapshot);
+  const head = `<div class="build-metrics ${headClass}"><b>Local smoke check:</b> ${passed}/${total} passed</div>`;
+  const grid = `<div class="smoke-grid">${results.map((row) => {
+    const cls = row.ok ? 'smoke-ok' : 'smoke-fail';
+    return `<div class="smoke-item"><div class="smoke-title">${escHtml(row.label)}</div><div class="${cls}">${row.ok ? 'PASS' : 'FAIL'} - ${escHtml(String(row.detail || ''))}</div><div class="smoke-meta">latency ${Number(row.latency || 0)}ms</div></div>`;
+  }).join('')}</div>`;
+  root.innerHTML = `${head}${grid}`;
+  setLocalSmokeNote(`Last run: ${new Date(lastLocalSmokeSnapshot.generated_at).toLocaleTimeString()} | Export and copy ready`, passed === total ? 'ok' : 'fail');
+}
+
+function setLocalSmokeNote(text, state = 'ok') {
+  const note = document.getElementById('localSmokeNote');
+  if (!note) return;
+  note.classList.remove('ok', 'fail');
+  note.classList.add(state === 'fail' ? 'fail' : 'ok');
+  note.textContent = text;
+}
+
+function loadLocalSmokeHistory() {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SMOKE_HISTORY_STORAGE_KEY);
+    if (!raw) {
+      localSmokeHistory = [];
+      renderLocalSmokeHistory();
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    localSmokeHistory = Array.isArray(parsed) ? parsed.slice(0, 5) : [];
+  } catch (_) {
+    localSmokeHistory = [];
+  }
+  renderLocalSmokeHistory();
+}
+
+function saveLocalSmokeHistory() {
+  try {
+    window.localStorage.setItem(LOCAL_SMOKE_HISTORY_STORAGE_KEY, JSON.stringify(localSmokeHistory.slice(0, 5)));
+  } catch (_) {
+    // Ignore storage errors to keep diagnostics non-blocking.
+  }
+}
+
+function prependLocalSmokeHistory(snapshot) {
+  if (!snapshot || !snapshot.summary) return;
+  const passed = Number(snapshot.summary.passed || 0);
+  const total = Number(snapshot.summary.total || 0);
+  const sample = {
+    generated_at: String(snapshot.generated_at || new Date().toISOString()),
+    passed,
+    total,
+  };
+  localSmokeHistory = [sample, ...localSmokeHistory].slice(0, 5);
+  saveLocalSmokeHistory();
+  renderLocalSmokeHistory();
+}
+
+function renderLocalSmokeHistory() {
+  const root = document.getElementById('localSmokeHistory');
+  if (!root) return;
+  if (!Array.isArray(localSmokeHistory) || localSmokeHistory.length === 0) {
+    root.classList.add('muted');
+    root.textContent = 'No local smoke history yet.';
+    return;
+  }
+  root.classList.remove('muted');
+  root.innerHTML = localSmokeHistory.map((entry) => {
+    const passed = Number(entry && entry.passed || 0);
+    const total = Number(entry && entry.total || 0);
+    const ok = total > 0 && passed === total;
+    const when = new Date(String(entry && entry.generated_at || '')).toLocaleString();
+    return `<div class="local-tools-history-row ${ok ? 'local-tools-history-ok' : 'local-tools-history-fail'}"><strong>${passed}/${total} passed</strong><span class="local-tools-history-time">${escHtml(when)}</span></div>`;
+  }).join('');
+}
+
+function clearLocalSmokeHistory() {
+  localSmokeHistory = [];
+  saveLocalSmokeHistory();
+  renderLocalSmokeHistory();
+  setLocalSmokeNote('Smoke history cleared.', 'ok');
+}
+
+function exportLocalSmokeCheck() {
+  if (!lastLocalSmokeSnapshot) {
+    setLocalSmokeNote('Run Local Smoke Check first to generate diagnostics.', 'fail');
+    return;
+  }
+
+  const payload = JSON.stringify(lastLocalSmokeSnapshot, null, 2);
+  const stamp = String(lastLocalSmokeSnapshot.generated_at || new Date().toISOString())
+    .replace(/[:]/g, '-')
+    .replace(/[.].+$/, '');
+  const filename = `local-smoke-${stamp}.json`;
+
+  const blob = new Blob([payload], {type: 'application/json;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  const passed = Number(lastLocalSmokeSnapshot.summary && lastLocalSmokeSnapshot.summary.passed || 0);
+  const total = Number(lastLocalSmokeSnapshot.summary && lastLocalSmokeSnapshot.summary.total || 0);
+  const cls = passed === total ? 'ok' : 'fail';
+  setLocalSmokeNote(`Exported ${filename}`, cls);
+}
+
+async function copyLocalSmokeCheck() {
+  if (!lastLocalSmokeSnapshot) {
+    setLocalSmokeNote('Run Local Smoke Check first to generate diagnostics.', 'fail');
+    return;
+  }
+
+  const payload = JSON.stringify(lastLocalSmokeSnapshot, null, 2);
+  const passed = Number(lastLocalSmokeSnapshot.summary && lastLocalSmokeSnapshot.summary.passed || 0);
+  const total = Number(lastLocalSmokeSnapshot.summary && lastLocalSmokeSnapshot.summary.total || 0);
+  const cls = passed === total ? 'ok' : 'fail';
+
+  try {
+    if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(payload);
+      setLocalSmokeNote('Diagnostics copied to clipboard.', cls);
+      return;
+    }
+  } catch (_) {
+    // Clipboard API can fail in some browser security contexts; fallback below.
+  }
+
+  const helper = document.createElement('textarea');
+  helper.value = payload;
+  helper.setAttribute('readonly', 'readonly');
+  helper.style.position = 'fixed';
+  helper.style.opacity = '0';
+  helper.style.pointerEvents = 'none';
+  document.body.appendChild(helper);
+  helper.select();
+  helper.setSelectionRange(0, helper.value.length);
+  let copied = false;
+  try {
+    copied = Boolean(document.execCommand && document.execCommand('copy'));
+  } catch (_) {
+    copied = false;
+  }
+  document.body.removeChild(helper);
+  if (copied) {
+    setLocalSmokeNote('Diagnostics copied to clipboard.', cls);
+  } else {
+    setLocalSmokeNote('Copy failed in this browser context. Use Export Diagnostics JSON.', 'fail');
+  }
+}
+
+function renderLocalRuntimeStatus(state, text) {
+  const el = document.getElementById('localRuntimeStatus');
+  if (!el) return;
+  el.classList.remove('runtime-live', 'runtime-down', 'runtime-checking', 'muted');
+  if (state === 'live') {
+    el.classList.add('runtime-live');
+  } else if (state === 'down') {
+    el.classList.add('runtime-down');
+  } else {
+    el.classList.add('runtime-checking', 'muted');
+  }
+  el.textContent = text;
+}
+
+async function pollLocalRuntimeStatus() {
+  renderLocalRuntimeStatus('checking', 'Checking local runtime...');
+  const started = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const timeoutMs = 3200;
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`/health?t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    window.clearTimeout(timeout);
+    const ended = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const latencyMs = Math.max(1, Math.round(ended - started));
+    if (!res.ok) {
+      renderLocalRuntimeStatus('down', `Local runtime down (HTTP ${res.status})`);
+      return;
+    }
+    const body = await res.json().catch(() => ({}));
+    const marker = body && body.status ? String(body.status) : 'ok';
+    renderLocalRuntimeStatus('live', `Local runtime live (${marker}, ${latencyMs}ms)`);
+  } catch (_) {
+    renderLocalRuntimeStatus('down', 'Local runtime unreachable on 127.0.0.1:5055');
+  } finally {
+    window.clearTimeout(localRuntimeTimer);
+    localRuntimeTimer = window.setTimeout(pollLocalRuntimeStatus, 5000);
+  }
 }
 
 function renderPrefetchStatus(data) {
@@ -159,10 +450,85 @@ function switchResultTab(tabName) {
   // Activate selected button
   const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
   if (btn) btn.classList.add('active');
+
+  if (tabName === 'meta') {
+    refreshMetaSnapshotStatus(false);
+  }
   
   // If tab contains a chart, trigger resize (for Chart.js responsiveness)
   if (window.scoreChart && scoreChart.resize) {
     setTimeout(() => scoreChart.resize(), 100);
+  }
+}
+
+function formatMetaSnapshotTimestamp(value) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num) || num <= 0) return 'n/a';
+  const date = new Date(num * 1000);
+  return date.toLocaleTimeString();
+}
+
+function formatMetaSnapshotAge(seconds) {
+  const s = Number(seconds || 0);
+  if (!Number.isFinite(s) || s < 1) return '<1s';
+  if (s < 60) return `${Math.round(s)}s`;
+  const mins = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${mins}m ${rem}s`;
+}
+
+function renderMetaSnapshotStatus(data) {
+  const root = document.getElementById('metaSnapshotStatus');
+  if (!root) return;
+  const running = Array.isArray(data && data.running) ? data.running : [];
+  const recent = Array.isArray(data && data.recent) ? data.recent.slice(0, 5) : [];
+  const grid = `
+    <div class="meta-snapshot-grid">
+      <span class="meta-snapshot-pill">running: ${Number(data && data.running_count || running.length || 0)}</span>
+      <span class="meta-snapshot-pill">recent: ${Number(data && data.recent_count || recent.length || 0)}</span>
+      <span class="meta-snapshot-pill">updated: ${new Date().toLocaleTimeString()}</span>
+    </div>`;
+
+  const runningHtml = running.length
+    ? `<div class="meta-snapshot-list">${running.slice(0, 4).map((row) => {
+        const key = escHtml(String(row.key || 'unknown'));
+        const started = formatMetaSnapshotTimestamp(row.started_at);
+        return `<div class="meta-snapshot-item"><span class="meta-snapshot-key">${key}</span><span class="meta-snapshot-time">started ${started}</span><div class="muted">status: running</div></div>`;
+      }).join('')}</div>`
+    : '<p class="muted" style="margin:0 0 0.4rem;">No snapshot jobs running.</p>';
+
+  const recentHtml = recent.length
+    ? `<div class="meta-snapshot-list">${recent.map((row) => {
+        const key = escHtml(String(row.key || 'unknown'));
+        const finished = formatMetaSnapshotTimestamp(row.finished_at);
+        const age = row.finished_at ? formatMetaSnapshotAge((Date.now() / 1000) - Number(row.finished_at || 0)) : 'n/a';
+        const ok = Boolean(row.ok);
+        const marker = ok ? '<span class="meta-snapshot-ok">ok</span>' : '<span class="meta-snapshot-fail">error</span>';
+        const extra = row.error ? `<div class="muted">${escHtml(String(row.error))}</div>` : '';
+        return `<div class="meta-snapshot-item"><span class="meta-snapshot-key">${key}</span> <span>${marker}</span><span class="meta-snapshot-time">finished ${finished} (${age} ago)</span>${extra}</div>`;
+      }).join('')}</div>`
+    : '<p class="muted" style="margin:0;">No recent snapshot runs yet.</p>';
+
+  root.innerHTML = `${grid}<div style="margin-bottom:0.45rem;"><b style="font-size:0.78rem;">Running</b>${runningHtml}</div><div><b style="font-size:0.78rem;">Recent</b>${recentHtml}</div>`;
+}
+
+async function refreshMetaSnapshotStatus(showLoading = false) {
+  const root = document.getElementById('metaSnapshotStatus');
+  if (!root) return;
+  if (showLoading) root.textContent = 'Loading local snapshot status...';
+  try {
+    const res = await fetch('/api/meta-snapshot-status');
+    const data = await res.json();
+    if (!res.ok) {
+      root.innerHTML = `<p class="err">${escHtml(data.error || 'Failed to load snapshot status')}</p>`;
+      return;
+    }
+    renderMetaSnapshotStatus(data || {});
+  } catch (_) {
+    root.innerHTML = '<p class="err">Snapshot status request failed.</p>';
+  } finally {
+    window.clearTimeout(metaSnapshotTimer);
+    metaSnapshotTimer = window.setTimeout(() => refreshMetaSnapshotStatus(false), 10000);
   }
 }
 
@@ -935,6 +1301,7 @@ async function runOptimize() {
     document.getElementById('metaComparison').innerHTML = formatMetaComparison(data.meta_comparison || {});
     renderScoreChart(data.ranked || []);
     renderBuildStory(data || {});
+    refreshMetaSnapshotStatus(false);
     if (window.lucide) { window.lucide.createIcons(); }
   } catch (err) {
     if (!document.getElementById('error').textContent) {
@@ -2087,7 +2454,10 @@ loadRuneCatalog();
 loadRuntimeCapabilities();
 loadOllamaModels();
 restoreQuickSelections();
+loadLocalSmokeHistory();
 pollPrefetchStatus();
+refreshMetaSnapshotStatus(true);
+pollLocalRuntimeStatus();
 
 if (window.lucide) { window.lucide.createIcons(); }
 
